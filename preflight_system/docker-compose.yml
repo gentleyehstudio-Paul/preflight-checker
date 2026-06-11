@@ -1,0 +1,77 @@
+version: "3.9"
+
+services:
+
+  # ── Redis 訊息佇列 ──────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: preflight_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ── FastAPI 主應用 ──────────────────────────────────
+  api:
+    build: .
+    container_name: preflight_api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./reports:/app/app/reports
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── Celery Worker（可水平擴展）─────────────────────
+  worker:
+    build: .
+    container_name: preflight_worker
+    command: celery -A app.tasks.celery_app worker
+             --loglevel=info
+             --concurrency=4
+             --queues=celery
+             --hostname=worker@%h
+    volumes:
+      - ./reports:/app/app/reports
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Flower 任務監控介面 ────────────────────────────
+  flower:
+    build: .
+    container_name: preflight_flower
+    command: celery -A app.tasks.celery_app flower
+             --port=5555
+             --broker=redis://redis:6379/0
+    ports:
+      - "5555:5555"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+      - worker
+    restart: unless-stopped
+
+# 報告持久化 Volume
+volumes:
+  reports:
