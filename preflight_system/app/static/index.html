@@ -81,6 +81,7 @@ select,input[type=number]{width:100%;padding:7px 10px;border:1px solid var(--bor
 .b-pass{background:var(--green-l);color:var(--green);border-color:var(--green)}
 .b-warn{background:var(--orange-l);color:var(--orange);border-color:var(--orange)}
 .b-fail{background:var(--red-l);color:var(--red);border-color:var(--red)}
+.b-error{background:var(--lgray);color:var(--gray);border-color:var(--gray)}
 .result-hd{display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem}
 .result-hd span{font-weight:600;font-size:14px}
 .dl-btn{display:inline-flex;align-items:center;gap:6px;padding:7px 12px;background:#fff;border:1px solid var(--border);border-radius:6px;font-size:13px;cursor:pointer;text-decoration:none;color:var(--black)}
@@ -95,6 +96,8 @@ select,input[type=number]{width:100%;padding:7px 10px;border:1px solid var(--bor
 .p-pass{background:var(--green-l);color:var(--green)}
 .p-warn{background:var(--orange-l);color:var(--orange)}
 .p-fail{background:var(--red-l);color:var(--red)}
+.p-error{background:var(--lgray);color:var(--gray)}
+.fmt-badge{display:inline-flex;align-items:center;gap:6px;background:var(--lgray);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:12px;color:var(--gray);margin-bottom:.75rem}
 .chev{font-size:11px;color:var(--gray);transition:transform .2s}
 .chev.open{transform:rotate(180deg)}
 .mod-body{display:none;border-top:1px solid var(--border)}
@@ -118,7 +121,7 @@ select,input[type=number]{width:100%;padding:7px 10px;border:1px solid var(--bor
     <div class="logo">✓</div>
     <div>
       <h1>印刷廠校稿系統</h1>
-      <p>Prepress PDF Preflight Checker v2.0 — 同步 / 非同步雙模式</p>
+      <p>Prepress Preflight Checker v2.1 — PDF / Adobe Illustrator(.ai) · 同步 / 非同步雙模式</p>
     </div>
   </header>
 
@@ -126,10 +129,10 @@ select,input[type=number]{width:100%;padding:7px 10px;border:1px solid var(--bor
   <div class="card">
     <div class="card-title">上傳稿件</div>
     <div class="drop" id="dropZone">
-      <input type="file" accept=".pdf" multiple id="fileInput" onchange="handleFiles(event)">
+      <input type="file" accept=".pdf,.ai" multiple id="fileInput" onchange="handleFiles(event)">
       <div class="drop-icon">📄</div>
-      <div class="drop-label">上傳 PDF 稿件</div>
-      <div class="drop-sub">點擊選擇或拖曳檔案 · 可多選批次上傳</div>
+      <div class="drop-label">上傳 PDF / AI 稿件</div>
+      <div class="drop-sub">點擊選擇或拖曳檔案 · 支援 .pdf / .ai · 可多選批次上傳</div>
     </div>
     <div id="fileBadges" style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px;"></div>
   </div>
@@ -196,6 +199,7 @@ select,input[type=number]{width:100%;padding:7px 10px;border:1px solid var(--bor
 
   <!-- 結果區（同步模式） -->
   <div id="resultSection">
+    <span id="fmtBadge" class="fmt-badge" style="display:none"></span>
     <div class="sum-row" id="sumRow"></div>
     <div id="overallBanner" class="banner"></div>
     <div class="result-hd">
@@ -238,7 +242,7 @@ dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('ove
 dz.addEventListener('dragleave',() => dz.classList.remove('over'));
 dz.addEventListener('drop', e => {
   e.preventDefault(); dz.classList.remove('over');
-  addFiles(Array.from(e.dataTransfer.files).filter(f => f.name.endsWith('.pdf')));
+  addFiles(Array.from(e.dataTransfer.files).filter(f => /\.(pdf|ai)$/i.test(f.name)));
 });
 
 // ── 模式切換 ─────────────────────────────────────────
@@ -262,7 +266,7 @@ function toggleCustom() {
 
 // ── 主執行 ────────────────────────────────────────────
 async function runAll() {
-  if (!files.length) { alert('請先選擇 PDF 檔案'); return; }
+  if (!files.length) { alert('請先選擇 PDF 或 AI 檔案'); return; }
   const btn = document.getElementById('runBtn');
   btn.disabled = true;
   if (mode === 'sync') {
@@ -390,10 +394,10 @@ function showResult(jobId) {
 }
 
 // ── 結果渲染 ──────────────────────────────────────────
-function icon(s)  { return s==='pass'?'✓':s==='warn'?'!':'✗'; }
-function label(s) { return s==='pass'?'通過':s==='warn'?'警告':'退稿'; }
-function vc(s)    { return s==='pass'?'vp':s==='warn'?'vw':'vf'; }
-function pc(s)    { return s==='pass'?'p-pass':s==='warn'?'p-warn':'p-fail'; }
+function icon(s)  { return s==='pass'?'✓':s==='warn'?'!':s==='error'?'💥':'✗'; }
+function label(s) { return s==='pass'?'通過':s==='warn'?'警告':s==='error'?'錯誤':'退稿'; }
+function vc(s)    { return s==='pass'?'vp':s==='warn'?'vw':s==='error'?'vf':'vf'; }
+function pc(s)    { return s==='pass'?'p-pass':s==='warn'?'p-warn':s==='error'?'p-error':'p-fail'; }
 
 function renderResult(data) {
   const sec = document.getElementById('resultSection');
@@ -409,11 +413,24 @@ function renderResult(data) {
      <div class="sum-card s-fail"><div class="num">${c.fail||0}</div><div class="lbl">項退稿</div></div>
      <div class="sum-card s-total"><div class="num">${data.results.length}</div><div class="lbl">項總計</div></div>`;
 
-  const oi = { pass:'✅', warn:'⚠️', fail:'❌' };
-  const ol = { pass:'通過 — 稿件符合印刷規格', warn:'需確認 — 部分項目需業務審核', fail:'退稿 — 稿件不符規格，請修改後重新上傳' };
+  const oi = { pass:'✅', warn:'⚠️', fail:'❌', error:'💥' };
+  const ol = { pass:'通過 — 稿件符合印刷規格', warn:'需確認 — 部分項目需業務審核',
+                fail:'退稿 — 稿件不符規格，請修改後重新上傳',
+                error:'無法處理 — 檔案格式錯誤，請參考下方說明' };
   const ob = document.getElementById('overallBanner');
   ob.className = `banner b-${data.overall}`;
   ob.textContent = `${oi[data.overall]}  整體結論：${ol[data.overall]}`;
+
+  // 檔案格式標籤
+  const fmtBadge = document.getElementById('fmtBadge');
+  if (fmtBadge) {
+    if (data.file_format) {
+      fmtBadge.style.display = 'inline-flex';
+      fmtBadge.textContent = `📄 檔案格式：${data.file_format}`;
+    } else {
+      fmtBadge.style.display = 'none';
+    }
+  }
 
   const dl = document.getElementById('dlBtn');
   dl.style.display = data.report_url ? 'inline-flex' : 'none';
@@ -428,6 +445,7 @@ function renderResult(data) {
         <span class="chev" id="chev-${i}">▾</span>
       </div>
       <div class="mod-body" id="body-${i}">
+        ${r.items && r.items.length ? `
         <table class="dt">
           <thead><tr><th>檢查項目</th><th>結果</th><th>狀態</th><th>說明</th></tr></thead>
           <tbody>${r.items.map(it=>`
@@ -438,7 +456,8 @@ function renderResult(data) {
               <td class="vnote">${it.note||'—'}</td>
             </tr>`).join('')}
           </tbody>
-        </table>
+        </table>` : `
+        <div style="padding:14px; font-size:13px; color:var(--gray); line-height:1.7;">${(r.message||'').replace(/\\n/g,'<br>')}</div>`}
       </div>
     </div>`).join('');
 }
