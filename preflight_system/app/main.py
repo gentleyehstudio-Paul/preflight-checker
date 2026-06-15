@@ -15,15 +15,15 @@ from celery.result import AsyncResult
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from preflight_checker import PreflightChecker
+from preflight_checker import PreflightChecker, SUPPORTED_EXTENSIONS
 from app.report_generator import generate_pdf_report
 from app.tasks import celery_app, run_preflight_task, UPLOAD_DIR
 
 # ── 設定 ────────────────────────────────────────────────
 app = FastAPI(
     title="印刷廠校稿系統 API",
-    description="Prepress PDF Preflight Checker — 支援同步／非同步雙模式",
-    version="2.0.0",
+    description="Prepress Preflight Checker — 支援 PDF / Adobe Illustrator(.ai)，同步／非同步雙模式",
+    version="2.1.0",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -75,8 +75,8 @@ async def run_preflight_sync(
     gen_report:  bool  = Form(True),
 ):
     """直接執行，適合 < 20MB、單頁稿件"""
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(400, "只接受 PDF 檔案")
+    if not file.filename.lower().endswith(SUPPORTED_EXTENSIONS):
+        raise HTTPException(400, "只接受 PDF（.pdf）或 Adobe Illustrator（.ai）檔案")
 
     if spec_name in SPEC_DB:
         w, h = SPEC_DB[spec_name]["w"], SPEC_DB[spec_name]["h"]
@@ -87,7 +87,8 @@ async def run_preflight_sync(
 
     tmp_path = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        suffix = Path(file.filename).suffix.lower()
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp.write(await file.read())
             tmp_path = tmp.name
 
@@ -124,12 +125,13 @@ async def run_preflight_async(
     客戶端輪詢 GET /jobs/{job_id} 取得進度與結果。
     適合 > 20MB 大型稿件、多頁稿、批次上傳。
     """
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(400, "只接受 PDF 檔案")
+    if not file.filename.lower().endswith(SUPPORTED_EXTENSIONS):
+        raise HTTPException(400, "只接受 PDF（.pdf）或 Adobe Illustrator（.ai）檔案")
 
     # 儲存上傳檔案（任務完成後 worker 自動刪除）
     job_id    = uuid.uuid4().hex[:16]
-    save_path = UPLOAD_DIR / f"{job_id}.pdf"
+    suffix    = Path(file.filename).suffix.lower()
+    save_path = UPLOAD_DIR / f"{job_id}{suffix}"
     with open(save_path, "wb") as f:
         f.write(await file.read())
 
@@ -215,13 +217,14 @@ async def health():
         worker_ok = True
     except Exception:
         worker_ok = False
-    return {"status": "ok", "version": "2.0.0", "worker": worker_ok}
+    return {"status": "ok", "version": "2.1.0", "worker": worker_ok}
 
 
 # ── 內部序列化工具 ───────────────────────────────────────
 def _serialize(report, filename, spec_name, report_url, report_id):
     return {
-        "filename":   filename,
+        "filename":    filename,
+        "file_format": report.file_format,
         "spec":       spec_name,
         "overall":    report.overall.value,
         "checked_at": datetime.now().isoformat(),

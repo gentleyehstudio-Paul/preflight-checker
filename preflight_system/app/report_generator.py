@@ -173,8 +173,8 @@ def generate_pdf_report(
     # 基本資訊表
     info_data = [
         ["稿件檔名", report.filename,  "校稿時間", datetime.now().strftime("%Y-%m-%d  %H:%M")],
-        ["成品規格", spec_name,        "要求出血", f"{bleed_mm} mm"],
-        ["最低解析度", f"{min_dpi} DPI", "", ""],
+        ["檔案格式", report.file_format, "成品規格", spec_name],
+        ["要求出血", f"{bleed_mm} mm",   "最低解析度", f"{min_dpi} DPI"],
     ]
     info_table = Table(
         info_data,

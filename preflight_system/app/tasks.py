@@ -108,30 +108,36 @@ def run_preflight_task(
 
         checker = PreflightChecker(file_path, w, h, bleed_mm, min_dpi)
 
-        results_raw = []
+        if checker.doc is None:
+            # 檔案無法開啟（例如 .ai 未啟用 PDF Compatible File）
+            logger.error(f"[{job_id}] 檔案無法開啟：{checker.open_error}")
+            report = checker.run_all()
+        else:
+            results_raw = []
 
-        # 逐項執行並更新進度
-        steps = [
-            (checker.check_color_mode,   40, "文字轉外框確認"),
-            (checker.check_fonts,        55, "出血設定檢查"),
-            (checker.check_bleed,        70, "成品尺寸檢查"),
-            (checker.check_size,         85, "影像解析度檢查"),
-            (checker.check_resolution,   95, "產生報告"),
-        ]
+            # 逐項執行並更新進度
+            steps = [
+                (checker.check_color_mode,   40, "文字轉外框確認"),
+                (checker.check_fonts,        55, "出血設定檢查"),
+                (checker.check_bleed,        70, "成品尺寸檢查"),
+                (checker.check_size,         85, "影像解析度檢查"),
+                (checker.check_resolution,   95, "產生報告"),
+            ]
 
-        for fn, next_progress, next_stage in steps:
-            r = fn()
-            results_raw.append(r)
-            self.update_state(state="PROGRESS", meta={
-                "job_id": job_id, "filename": filename,
-                "progress": next_progress, "stage": next_stage,
-            })
+            for fn, next_progress, next_stage in steps:
+                r = fn()
+                results_raw.append(r)
+                self.update_state(state="PROGRESS", meta={
+                    "job_id": job_id, "filename": filename,
+                    "progress": next_progress, "stage": next_stage,
+                })
 
-        checker.doc.close()
+            checker.doc.close()
 
-        # 組合 report
-        from preflight_checker import PreflightReport
-        report = PreflightReport(filename=filename, results=results_raw)
+            # 組合 report
+            from preflight_checker import PreflightReport
+            report = PreflightReport(filename=filename, results=results_raw,
+                                      file_format=checker.file_format_label)
 
         # ── 產生 PDF 報告 ─────────────────────────────────
         report_url = None
@@ -166,6 +172,7 @@ def run_preflight_task(
     return {
         "job_id":      job_id,
         "filename":    filename,
+        "file_format": report.file_format,
         "spec":        spec_name,
         "overall":     report.overall.value,
         "checked_at":  datetime.now().isoformat(),
