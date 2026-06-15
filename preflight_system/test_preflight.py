@@ -11,7 +11,7 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent / "app"))
 
-from preflight_checker import PreflightChecker, PreflightReport, Status
+from preflight_checker import PreflightChecker, PreflightReport, Status, SUPPORTED_EXTENSIONS
 from app.report_generator import generate_pdf_report
 
 # ─────────────────────────────────────────────────────────
@@ -97,6 +97,76 @@ def make_pdf(scenario: str) -> str:
     doc.close()
     tmp.close()
     return tmp.name
+
+
+def make_ai(scenario: str) -> str:
+    """
+    建立 .ai 副檔名的測試檔案。
+
+    情境說明：
+      good_single   — 單一工作區域，A4 + 出血，PDF 相容（應正常開啟）
+      multi_artboard— 3 個工作區域（多頁 PDF 偽裝成 .ai）
+      linked_images — 含 XMP Ingredients 連結圖片清單
+      not_compatible— 非 PDF 相容的二進位內容（應觸發友善錯誤訊息）
+    """
+    PT = 72 / 25.4
+
+    if scenario == "not_compatible":
+        tmp = tempfile.NamedTemporaryFile(suffix="_not_compatible.ai", delete=False)
+        tmp.write(b"\x07\x07\xffAI-binary-no-pdf-header" * 30)
+        tmp.close()
+        return tmp.name
+
+    doc = fitz.open()
+
+    if scenario == "good_single":
+        bleed = 3 * PT
+        w = 210 * PT + 2 * bleed
+        h = 297 * PT + 2 * bleed
+        page = doc.new_page(width=w, height=h)
+        page.set_trimbox(fitz.Rect(bleed, bleed, w-bleed, h-bleed))
+
+    elif scenario == "multi_artboard":
+        for i in range(3):
+            p = doc.new_page(width=210*PT, height=297*PT)
+            p.insert_text((72, 100), f"Artboard {i+1}", fontsize=20)
+
+    elif scenario == "linked_images":
+        page = doc.new_page(width=210*PT, height=297*PT)
+        page.insert_text((50, 100), "Design with linked images")
+        xmp = '''<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="">
+   <xmpMM:Ingredients xmlns:xmpMM="http://ns.adobe.com/xap/1.0/mm/">
+    <rdf:Bag>
+     <rdf:li rdf:parseType="Resource">
+      <stRef:filePath xmlns:stRef="http://ns.adobe.com/xap/1.0/sType/ResourceRef#">/Photos/product_hero.tif</stRef:filePath>
+     </rdf:li>
+     <rdf:li rdf:parseType="Resource">
+      <stRef:filePath xmlns:stRef="http://ns.adobe.com/xap/1.0/sType/ResourceRef#">/Photos/logo_bg.psd</stRef:filePath>
+     </rdf:li>
+    </rdf:Bag>
+   </xmpMM:Ingredients>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>'''
+        doc.set_xml_metadata(xmp)
+
+    # 先存成 .pdf（PyMuPDF 不能直接以 .ai 存檔），再複製為 .ai
+    # → 模擬 Illustrator「Create PDF Compatible File」勾選後的內部結構
+    tmp_pdf = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    doc.save(tmp_pdf.name)
+    doc.close()
+    tmp_pdf.close()
+
+    ai_path = tmp_pdf.name[:-4] + f"_{scenario}.ai"
+    import shutil
+    shutil.copy(tmp_pdf.name, ai_path)
+    os.unlink(tmp_pdf.name)
+    return ai_path
+
 
 
 def _make_png(w, h, raw_rgb):
@@ -442,6 +512,145 @@ def test_edge_cases():
 
 
 # ─────────────────────────────────────────────────────────
+# 測試五：Adobe Illustrator (.ai) 格式支援
+# ─────────────────────────────────────────────────────────
+
+def test_ai_format():
+    section("測試五：Adobe Illustrator (.ai) 格式支援")
+
+    # 5-1 副檔名常數確認
+    if ".ai" in SUPPORTED_EXTENSIONS and ".pdf" in SUPPORTED_EXTENSIONS:
+        ok(f"SUPPORTED_EXTENSIONS 含 .pdf 與 .ai：{SUPPORTED_EXTENSIONS}")
+    else:
+        ng("SUPPORTED_EXTENSIONS 缺少 .pdf 或 .ai", str(SUPPORTED_EXTENSIONS))
+
+    # 5-2 單一工作區域的 PDF 相容 AI 檔
+    path = make_ai("good_single")
+    try:
+        c = PreflightChecker(path, 210, 297, 3, 300)
+        if not c.is_ai_file:
+            ng("good_single — is_ai_file 應為 True")
+        elif c.doc is None:
+            ng("good_single — 應可成功開啟", c.open_error)
+        else:
+            r = c.run_all()
+            if r.file_format == "Adobe Illustrator (.ai)":
+                ok(f"單一工作區域 AI 檔 — 檔案格式正確識別為「{r.file_format}」")
+            else:
+                ng("檔案格式標示錯誤", r.file_format)
+            size_r = next(x for x in r.results if "工作區域" in x.module or "尺寸" in x.module)
+            ab = next((i for i in size_r.items if "工作區域" in i.key), None)
+            if ab and ab.value == "1 個":
+                ok("單一工作區域 — 數量正確標示為「1 個」")
+            else:
+                ng("工作區域數量標示錯誤", str(ab))
+    except Exception as e:
+        ng("good_single 測試失敗", str(e))
+    finally:
+        os.unlink(path)
+
+    # 5-3 多工作區域 AI 檔
+    path = make_ai("multi_artboard")
+    try:
+        c = PreflightChecker(path, 210, 297, 3, 300)
+        r = c.run_all()
+        size_r = next(x for x in r.results if "工作區域" in x.module or "尺寸" in x.module)
+        ab = next((i for i in size_r.items if "工作區域" in i.key), None)
+        if ab and ab.value == "3 個" and "Artboard" in ab.note:
+            ok(f"多工作區域 AI 檔 — 正確回報 3 個工作區域，並附加說明")
+        else:
+            ng("多工作區域標示錯誤", str(ab))
+    except Exception as e:
+        ng("multi_artboard 測試失敗", str(e))
+    finally:
+        os.unlink(path)
+
+    # 5-4 含連結圖片的 AI 檔（XMP Ingredients）
+    path = make_ai("linked_images")
+    try:
+        c = PreflightChecker(path, 210, 297, 3, 300)
+        linked = c._detect_linked_images()
+        if len(linked) == 2:
+            ok(f"連結圖片偵測 — 從 XMP Ingredients 找到 {len(linked)} 個連結檔案")
+        else:
+            ng("連結圖片偵測數量不符", str(linked))
+
+        r = c.run_all()
+        res_r = next(x for x in r.results if "解析度" in x.module)
+        link_item = next((i for i in res_r.items if "連結圖片" in i.key), None)
+        if link_item and link_item.status == Status.WARNING:
+            ok("連結圖片 — 影像解析度模組正確標示為警告，並提供「封裝」建議")
+        else:
+            ng("連結圖片未正確標示為警告", str(link_item))
+    except Exception as e:
+        ng("linked_images 測試失敗", str(e))
+    finally:
+        os.unlink(path)
+
+    # 5-5 非 PDF 相容的 .ai 檔（應友善退稿並提示使用者）
+    path = make_ai("not_compatible")
+    try:
+        c = PreflightChecker(path, 210, 297, 3, 300)
+        if c.doc is not None:
+            ng("not_compatible — 應無法開啟檔案，但 doc 不為 None")
+        elif "Create PDF Compatible File" not in (c.open_error or ""):
+            ng("錯誤訊息未包含 PDF Compatible 提示", c.open_error)
+        else:
+            ok("非 PDF 相容 .ai 檔 — 友善錯誤訊息正確提示「Create PDF Compatible File」")
+
+        r = c.run_all()
+        if r.overall == Status.ERROR and r.open_error:
+            ok("非 PDF 相容 .ai 檔 — run_all() 正確回傳 ERROR 且不中斷程式")
+        else:
+            ng("non_compatible — overall 應為 ERROR", r.overall.value)
+    except Exception as e:
+        ng("not_compatible 測試失敗", str(e))
+    finally:
+        os.unlink(path)
+
+    # 5-6 透過 API 上傳 .ai 檔（同步端點）
+    path = make_ai("good_single")
+    try:
+        from fastapi.testclient import TestClient
+        import app.tasks as tasks_mod
+        tasks_mod.run_preflight_task.apply_async = lambda **kw: type("F",(object,),{"id":"fake"})()
+        from app.main import app as fastapi_app
+        client = TestClient(fastapi_app)
+
+        with open(path, "rb") as f:
+            res = client.post("/preflight",
+                data={"spec_name":"A4","bleed_mm":"3","min_dpi":"300","gen_report":"false"},
+                files={"file": ("design.ai", f, "application/postscript")})
+        if res.status_code == 200:
+            body = res.json()
+            if body.get("file_format") == "Adobe Illustrator (.ai)":
+                ok(f"POST /preflight（.ai 檔）— 成功處理，file_format 正確回傳")
+            else:
+                ng("API 回應缺少正確 file_format", str(body.get("file_format")))
+        else:
+            ng(f"POST /preflight（.ai 檔）— HTTP {res.status_code}", res.text[:150])
+    except Exception as e:
+        ng("API .ai 上傳測試失敗", str(e))
+    finally:
+        os.unlink(path)
+
+    # 5-7 API 仍正確拒絕不支援的格式（如 .docx）
+    try:
+        from fastapi.testclient import TestClient
+        from app.main import app as fastapi_app
+        client = TestClient(fastapi_app)
+        res = client.post("/preflight",
+            data={"spec_name":"A4","bleed_mm":"3","min_dpi":"300","gen_report":"false"},
+            files={"file": ("doc.docx", b"not pdf or ai", "application/vnd.openxmlformats")})
+        if res.status_code == 400:
+            ok("POST /preflight（.docx）— 正確回傳 400（仍拒絕非 PDF/AI 格式）")
+        else:
+            ng(f"POST /preflight（.docx）— 應為 400，得到 {res.status_code}")
+    except Exception as e:
+        ng(".docx 拒絕測試失敗", str(e))
+
+
+# ─────────────────────────────────────────────────────────
 # 主程式
 # ─────────────────────────────────────────────────────────
 
@@ -455,6 +664,7 @@ if __name__ == "__main__":
     test_report()
     test_api()
     test_edge_cases()
+    test_ai_format()
 
     total = passed + failed
     print(f"\n{'═'*55}")

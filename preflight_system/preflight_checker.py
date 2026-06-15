@@ -2,6 +2,10 @@
 印刷廠校稿系統 — 核心檢查引擎
 Prepress PDF Preflight Checker
 
+支援格式：
+    - PDF（.pdf）
+    - Adobe Illustrator（.ai，需於存檔時啟用「Create PDF Compatible File／建立 PDF 相容檔案」）
+
 依賴套件：
     pip install pymupdf pillow pypdf
 
@@ -12,12 +16,20 @@ Prepress PDF Preflight Checker
 """
 
 import fitz          # PyMuPDF
+import re
 import struct
 import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 from pathlib import Path
+
+
+# 支援上傳的副檔名
+SUPPORTED_EXTENSIONS = (".pdf", ".ai")
+
+# 連結圖片常見的外部檔案副檔名（用於 XMP / OPI 偵測）
+LINKED_IMAGE_EXT = r"(?:tif|tiff|psd|psb|eps|jpg|jpeg|png|gif|bmp|raw)"
 
 
 # ─────────────────────────────────────────────
@@ -59,11 +71,15 @@ class CheckResult:
 @dataclass
 class PreflightReport:
     """完整校稿報告"""
-    filename: str
-    results:  list[CheckResult] = field(default_factory=list)
+    filename:    str
+    results:     list[CheckResult] = field(default_factory=list)
+    file_format: str = "PDF"        # "PDF" 或 "Adobe Illustrator (.ai)"
+    open_error:  Optional[str] = None
 
     @property
     def overall(self) -> Status:
+        if self.open_error:
+            return Status.ERROR
         priority = [Status.ERROR, Status.FAIL, Status.WARNING, Status.PASS]
         worst = Status.PASS
         for r in self.results:
@@ -73,7 +89,13 @@ class PreflightReport:
 
     def summary(self) -> str:
         icon = {Status.PASS: "✅", Status.WARNING: "⚠️", Status.FAIL: "❌", Status.ERROR: "💥"}
-        lines = [f"\n{'='*55}", f"  校稿報告 — {self.filename}", f"  整體結果：{icon[self.overall]} {self.overall.value.upper()}", f"{'='*55}"]
+        lines = [f"\n{'='*55}", f"  校稿報告 — {self.filename}", f"  檔案格式：{self.file_format}",
+                 f"  整體結果：{icon[self.overall]} {self.overall.value.upper()}", f"{'='*55}"]
+        if self.open_error:
+            lines.append(f"\n💥 無法開啟檔案")
+            lines.append(f"  {self.open_error}")
+            lines.append(f"\n{'='*55}\n")
+            return "\n".join(lines)
         for r in self.results:
             lines.append(f"\n{icon[r.status]} {r.module}（{r.status.value}）")
             for item in r.items:
@@ -106,7 +128,35 @@ class PreflightChecker:
         self.bleed_mm      = bleed_mm
         self.min_dpi       = min_dpi
         self.tol           = tolerance_mm
-        self.doc: fitz.Document = fitz.open(str(pdf_path))
+
+        ext = self.path.suffix.lower()
+        self.is_ai_file        = (ext == ".ai")
+        self.file_format_label = "Adobe Illustrator (.ai)" if self.is_ai_file else "PDF"
+
+        self.doc: Optional[fitz.Document] = None
+        self.open_error: Optional[str] = None
+
+        try:
+            if self.is_ai_file:
+                # .ai 檔案內部多為 PDF 相容結構，明確指定 filetype 避免副檔名判斷問題
+                self.doc = fitz.open(str(pdf_path), filetype="pdf")
+            else:
+                self.doc = fitz.open(str(pdf_path))
+
+            if self.doc.page_count == 0:
+                raise ValueError("檔案內無任何頁面／工作區域")
+
+        except Exception as e:
+            self.doc = None
+            if self.is_ai_file:
+                self.open_error = (
+                    f"無法解析此 .ai 檔案（{e}）。"
+                    "最常見原因是存檔時未啟用「Create PDF Compatible File（建立 PDF 相容檔案）」選項 — "
+                    "請在 Adobe Illustrator 中開啟原始檔案，執行「另存新檔」，"
+                    "於存檔對話框中勾選「Create PDF Compatible File」後重新上傳。"
+                )
+            else:
+                self.open_error = f"無法解析此 PDF 檔案（{e}），請確認檔案未損毀。"
 
     # ── 工具方法 ─────────────────────────────
 
@@ -333,9 +383,60 @@ class PreflightChecker:
                    "" if match else "尺寸與訂單不符，請確認後重新供稿")
 
         page_count = len(self.doc)
-        result.add("總頁數", f"{page_count} 頁", Status.PASS)
+        if self.is_ai_file:
+            if page_count > 1:
+                result.add("工作區域數量", f"{page_count} 個", Status.PASS,
+                           "AI 檔案含多個工作區域（Artboard），系統以第一個工作區域進行尺寸與出血比對，其餘工作區域請分別輸出檢查")
+            else:
+                result.add("工作區域數量", f"{page_count} 個", Status.PASS)
+        else:
+            result.add("總頁數", f"{page_count} 頁", Status.PASS)
 
         return result
+
+    # ─────────────────────────────────────────
+    # 連結圖片（未嵌入）偵測 — 輔助方法
+    # ─────────────────────────────────────────
+
+    def _detect_linked_images(self) -> list[str]:
+        """偵測檔案中是否存在連結（未嵌入）的圖片。"""
+        linked = []
+
+        try:
+            xmp = self.doc.get_xml_metadata()
+        except Exception:
+            xmp = None
+
+        if xmp:
+            ext_re = r"(?:tif|tiff|psd|psb|eps|jpg|jpeg|png|gif|bmp)"
+            # 屬性形式：filePath="xxx.tif" 或 originalDocumentID="xxx.tif"
+            linked += re.findall(
+                rf'(?:filePath|originalDocumentID)="([^"]*\.{ext_re})"', xmp, re.IGNORECASE)
+            # 元素形式：<stRef:filePath ...>xxx.tif</stRef:filePath>（Illustrator Ingredients/Pantry 實際結構）
+            linked += re.findall(
+                rf'<(?:[\w]+:)?filePath[^>]*>([^<]*\.{ext_re})</(?:[\w]+:)?filePath>', xmp, re.IGNORECASE)
+            # 直接列於 <rdf:li> 內的純文字檔名
+            linked += re.findall(
+                rf'<rdf:li[^>]*>([^<]*\.{ext_re})</rdf:li>', xmp, re.IGNORECASE)
+
+        # /OPI 字典：Open Prepress Interface，業界標準的連結圖片標記
+        try:
+            for xref in range(1, self.doc.xref_length()):
+                try:
+                    obj = self.doc.xref_object(xref, compressed=True)
+                except Exception:
+                    continue
+                if obj and "/OPI" in obj:
+                    linked.append(f"物件 #{xref}（OPI 連結圖片）")
+        except Exception:
+            pass
+
+        seen, unique = set(), []
+        for item in linked:
+            if item not in seen:
+                seen.add(item)
+                unique.append(item)
+        return unique
 
     # ─────────────────────────────────────────
     # 5. 影像解析度檢查
@@ -375,8 +476,18 @@ class PreflightChecker:
                 except Exception:
                     pass
 
+        linked_images = self._detect_linked_images()
+
         if img_count == 0:
-            result.add("嵌入影像數量", "0（無點陣影像）", Status.PASS)
+            if linked_images:
+                sample = "、".join(linked_images[:3])
+                result.add("嵌入影像數量", "0（無嵌入點陣影像）", Status.PASS)
+                result.add("連結圖片（未嵌入）", f"偵測到 {len(linked_images)} 個",
+                           Status.WARNING,
+                           f"範例：{sample}　|　連結圖片無法計算實際解析度，"
+                           "請改用「封裝」(File > Package) 或將所有連結圖片嵌入後重新上傳")
+            else:
+                result.add("嵌入影像數量", "0（無點陣影像）", Status.PASS)
             return result
 
         result.add("嵌入影像數量", f"{img_count} 張", Status.PASS)
@@ -399,6 +510,13 @@ class PreflightChecker:
                        f"{len(low_dpi)} 張（{details}）", sev,
                        "解析度不足，印刷後可能出現馬賽克或模糊")
 
+        if linked_images:
+            sample = "、".join(linked_images[:3])
+            result.add("連結圖片（未嵌入）", f"偵測到 {len(linked_images)} 個",
+                       Status.WARNING,
+                       f"範例：{sample}　|　連結圖片無法計算實際解析度，"
+                       "請改用「封裝」(File > Package) 或將所有連結圖片嵌入後重新上傳")
+
         return result
 
     # ─────────────────────────────────────────
@@ -406,7 +524,17 @@ class PreflightChecker:
     # ─────────────────────────────────────────
 
     def run_all(self) -> PreflightReport:
-        report = PreflightReport(filename=self.path.name)
+        report = PreflightReport(filename=self.path.name, file_format=self.file_format_label)
+
+        if self.doc is None:
+            report.open_error = self.open_error
+            report.results.append(CheckResult(
+                module="檔案格式檢查",
+                status=Status.ERROR,
+                message=self.open_error,
+            ))
+            return report
+
         checks = [
             self.check_color_mode,
             self.check_fonts,
@@ -501,8 +629,9 @@ async def run_preflight(
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 2:
-        print("使用方式：python preflight_checker.py <PDF路徑> [寬mm] [高mm] [出血mm] [最低DPI]")
+        print("使用方式：python preflight_checker.py <PDF或AI路徑> [寬mm] [高mm] [出血mm] [最低DPI]")
         print("範例：  python preflight_checker.py artwork.pdf 210 297 3 300")
+        print("範例：  python preflight_checker.py artwork.ai 210 297 3 300")
         sys.exit(0)
 
     pdf_path    = sys.argv[1]
