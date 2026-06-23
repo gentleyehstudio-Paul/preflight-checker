@@ -173,31 +173,48 @@ class PreflightChecker:
     def check_color_mode(self) -> CheckResult:
         result = CheckResult(module="色彩模式偵測", status=Status.PASS)
         page_count = len(self.doc)
-        rgb_images      = 0
-        rgb_pages        = []
-        has_spot         = False
-        icc_names        = set()
+        rgb_images = 0
+        rgb_pages  = []
+        has_spot   = False
+        icc_names  = set()
 
         for page_num in range(page_count):
             page = self.doc[page_num]
 
-            # 掃描頁面資源中的 XObject（影像）
-            for xref in page.get_xobjects():
+            # get_images() 比 get_xobjects() 更可靠，能取得真實色彩空間資訊
+            for img in page.get_images(full=True):
+                xref = img[0]
                 try:
-                    img_info = self.doc.extract_image(xref[0])
-                    if img_info:
-                        cs = img_info.get("colorspace", 0)
-                        # PyMuPDF colorspace: 1=Gray, 3=RGB, 4=CMYK
-                        if cs == 3:
-                            rgb_images += 1
-                            if page_num + 1 not in rgb_pages:
-                                rgb_pages.append(page_num + 1)
+                    img_info = self.doc.extract_image(xref)
+                    if not img_info:
+                        continue
+
+                    cs_num  = img_info.get("colorspace", 0)   # 1=Gray, 3=RGB, 4=CMYK
+                    cs_name = (img_info.get("cs-name") or "").lower()
+
+                    is_rgb = (
+                        cs_num == 3                        # colorspace 數值判斷
+                        or "rgb"  in cs_name               # cs-name 含 rgb（含 sRGB, ICCBased(RGB,...)）
+                        or "srgb" in cs_name
+                    )
+
+                    if is_rgb:
+                        rgb_images += 1
+                        if page_num + 1 not in rgb_pages:
+                            rgb_pages.append(page_num + 1)
+
+                    # 從 cs-name 擷取 ICC Profile 名稱供報告顯示
+                    if cs_name and "icc" not in cs_name and "gray" not in cs_name:
+                        if "japan color" in cs_name or "japan" in cs_name:
+                            icc_names.add("Japan Color 2001 Coated")
+                        elif "srgb" in cs_name or "rgb" in cs_name:
+                            icc_names.add("sRGB IEC61966-2.1")
+                        elif "cmyk" in cs_name:
+                            icc_names.add(cs_name.split("(")[0].strip())
                 except Exception:
                     pass
 
-            # 讀取頁面顏色空間資訊
-            rsrc = page.get_text("rawdict", flags=0)
-            # 透過底層 xref 讀取 /Resources /ColorSpace
+            # Spot / DeviceN 特別色偵測（從頁面資源字典）
             try:
                 xref_id = page.xref
                 if xref_id > 0:
@@ -207,31 +224,29 @@ class PreflightChecker:
             except Exception:
                 pass
 
-        # 嘗試讀取 ICC profile 名稱（從 PDF OutputIntent）
+        # ICC Profile 也從 metadata 補充判斷
         try:
-            trailer = self.doc.pdf_trailer()
-            # 簡化：讀取 /Info metadata
-            meta = self.doc.metadata
+            meta    = self.doc.metadata
             creator = meta.get("creator", "")
-            producer = meta.get("producer", "")
+            producer= meta.get("producer", "")
             if "Japan Color" in producer or "Japan Color" in creator:
                 icc_names.add("Japan Color 2001 Coated")
-            elif "sRGB" in producer or "sRGB" in creator:
-                icc_names.add("sRGB IEC61966-2.1")
         except Exception:
             pass
 
         icc_display = ", ".join(icc_names) if icc_names else "未偵測到"
 
-        # 判斷結果
+        # ── 判斷輸出 ──────────────────────────────────
         if rgb_images == 0:
             result.add("色彩空間", "CMYK（符合印刷要求）", Status.PASS)
             result.add("RGB 物件數量", "0 個", Status.PASS)
         elif rgb_images <= 3:
-            result.add("色彩空間", "CMYK + RGB 混用", Status.WARNING, "建議將 RGB 影像轉換為 CMYK")
+            result.add("色彩空間", "CMYK + RGB 混用", Status.WARNING,
+                       "建議將 RGB 影像轉換為 CMYK")
             result.add("RGB 物件數量", f"{rgb_images} 個（頁面：{rgb_pages}）", Status.WARNING)
         else:
-            result.add("色彩空間", "RGB（不符印刷要求）", Status.FAIL, "所有影像必須轉換為 CMYK")
+            result.add("色彩空間", "RGB（不符印刷要求）", Status.FAIL,
+                       "所有影像必須轉換為 CMYK 才能正確印刷")
             result.add("RGB 物件數量", f"{rgb_images} 個（影響頁面：{rgb_pages}）", Status.FAIL)
 
         result.add("Spot Color（特別色）", "有" if has_spot else "未偵測到",
@@ -328,7 +343,9 @@ class PreflightChecker:
             bleed_right  = self._pt_to_mm(media.x1 - trim.x1)
             bleed_top    = self._pt_to_mm(media.y1 - trim.y1)
             bleed_bottom = self._pt_to_mm(trim.y0 - media.y0)
-            result.add("BleedBox", "未設定（以 MediaBox/TrimBox 差值推算）", Status.WARNING)
+            # BleedBox 缺失本身不影響判定，只做說明性提示
+            result.add("BleedBox", "未設定（以 MediaBox/TrimBox 差值推算）", Status.PASS,
+                       "建議存檔時設定 BleedBox，部分 RIP 系統需要此欄位")
         else:
             bleed_left   = self._pt_to_mm(trim.x0 - bleed_box.x0)
             bleed_right  = self._pt_to_mm(bleed_box.x1 - trim.x1)
@@ -338,7 +355,11 @@ class PreflightChecker:
 
         required = self.bleed_mm
         for direction, val in [("上", bleed_top), ("下", bleed_bottom), ("左", bleed_left), ("右", bleed_right)]:
-            if val >= required:
+            if required == 0:
+                # 不要求出血時，任何值都通過
+                result.add(f"出血值（{direction}）", f"{val} mm", Status.PASS)
+            elif val >= required:
+                # 等於或超過規格都算通過（超出不扣分）
                 result.add(f"出血值（{direction}）", f"{val} mm", Status.PASS)
             elif val >= required * 0.7:
                 result.add(f"出血值（{direction}）", f"{val} mm（略不足，需 {required} mm）",
