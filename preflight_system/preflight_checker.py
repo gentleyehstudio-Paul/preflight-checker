@@ -318,18 +318,26 @@ class PreflightChecker:
         result = CheckResult(module="出血設定檢查", status=Status.PASS)
         page = self.doc[0]
 
-        media  = page.mediabox     # 最外框
-        trim   = page.trimbox      # 裁切線（成品）
+        media = page.mediabox   # 最外框
+        trim  = page.trimbox    # 裁切線（成品）
+
+        # ── 判斷 TrimBox 是否有效設定 ──────────────────────
+        # PyMuPDF 當 TrimBox 未設定時會回傳與 MediaBox 相同的值
+        trimbox_is_set = (
+            abs(trim.x0 - media.x0) > 0.5 or
+            abs(trim.y0 - media.y0) > 0.5 or
+            abs(trim.x1 - media.x1) > 0.5 or
+            abs(trim.y1 - media.y1) > 0.5
+        )
+
         bleed_box = None
 
-        # 嘗試讀取 BleedBox
+        # ── 嘗試讀取 BleedBox ───────────────────────────────
         try:
             xref = page.xref
             if xref > 0:
                 obj = self.doc.xref_object(xref)
                 if "/BleedBox" in obj:
-                    # 解析 /BleedBox [x0 y0 x1 y1]
-                    import re
                     m = re.search(r"/BleedBox\s*\[([^\]]+)\]", obj)
                     if m:
                         vals = list(map(float, m.group(1).split()))
@@ -337,29 +345,65 @@ class PreflightChecker:
         except Exception:
             pass
 
-        if bleed_box is None:
-            # 若無 BleedBox，以 MediaBox 和 TrimBox 差值估算
-            bleed_left   = self._pt_to_mm(trim.x0 - media.x0)
-            bleed_right  = self._pt_to_mm(media.x1 - trim.x1)
-            bleed_top    = self._pt_to_mm(media.y1 - trim.y1)
-            bleed_bottom = self._pt_to_mm(trim.y0 - media.y0)
-            # BleedBox 缺失本身不影響判定，只做說明性提示
-            result.add("BleedBox", "未設定（以 MediaBox/TrimBox 差值推算）", Status.PASS,
-                       "建議存檔時設定 BleedBox，部分 RIP 系統需要此欄位")
-        else:
+        # ── 計算四邊出血值 ──────────────────────────────────
+        if bleed_box is not None:
+            # 情境 A：有 BleedBox → 最精確，直接算 BleedBox 和 TrimBox 的差值
             bleed_left   = self._pt_to_mm(trim.x0 - bleed_box.x0)
             bleed_right  = self._pt_to_mm(bleed_box.x1 - trim.x1)
             bleed_top    = self._pt_to_mm(bleed_box.y1 - trim.y1)
             bleed_bottom = self._pt_to_mm(trim.y0 - bleed_box.y0)
             result.add("BleedBox", "已設定", Status.PASS)
 
+        elif trimbox_is_set:
+            # 情境 B：有 TrimBox（與 MediaBox 不同）→ 用 MediaBox 和 TrimBox 差值估算
+            bleed_left   = self._pt_to_mm(trim.x0 - media.x0)
+            bleed_right  = self._pt_to_mm(media.x1 - trim.x1)
+            bleed_top    = self._pt_to_mm(media.y1 - trim.y1)
+            bleed_bottom = self._pt_to_mm(trim.y0 - media.y0)
+            result.add("BleedBox", "未設定（以 MediaBox/TrimBox 差值推算）", Status.PASS,
+                       "建議存檔時設定 BleedBox，部分 RIP 系統需要此欄位")
+
+        else:
+            # 情境 C：TrimBox 未設定（AI 檔常見）
+            # MediaBox 本身即為畫布大小，以規格成品尺寸反推出血量
+            # → 計算 MediaBox 比規格尺寸多出多少
+            spec_w_pt = self.spec_w * self.PT_PER_MM
+            spec_h_pt = self.spec_h * self.PT_PER_MM
+            media_w_pt = media.width
+            media_h_pt = media.height
+
+            # 判斷方向（直式或橫式）
+            if abs(media_w_pt - spec_w_pt) <= 2 and abs(media_h_pt - spec_h_pt) <= 2:
+                # MediaBox 剛好等於成品尺寸 → 出血為 0
+                extra_w = extra_h = 0.0
+            elif abs(media_w_pt - spec_h_pt) <= 2 and abs(media_h_pt - spec_w_pt) <= 2:
+                # 橫式：MediaBox 剛好等於成品尺寸（旋轉） → 出血為 0
+                extra_w = extra_h = 0.0
+            else:
+                # MediaBox 比規格大 → 多出的部分均分為出血
+                extra_w = max(0.0, media_w_pt - spec_w_pt) / 2
+                extra_h = max(0.0, media_h_pt - spec_h_pt) / 2
+                # 也試橫式
+                if extra_w == 0 and extra_h == 0:
+                    extra_w = max(0.0, media_w_pt - spec_h_pt) / 2
+                    extra_h = max(0.0, media_h_pt - spec_w_pt) / 2
+
+            bleed_left = bleed_right = self._pt_to_mm(extra_w)
+            bleed_top  = bleed_bottom = self._pt_to_mm(extra_h)
+
+            result.add("BleedBox",  "未設定", Status.PASS,
+                       "建議存檔時設定 BleedBox，部分 RIP 系統需要此欄位")
+            result.add("TrimBox",   "未設定（以成品規格反推出血量）", Status.PASS,
+                       f"系統以規格尺寸 {self.spec_w}×{self.spec_h} mm 計算 MediaBox 多出的出血量")
+
+        # ── 四邊判定 ────────────────────────────────────────
         required = self.bleed_mm
-        for direction, val in [("上", bleed_top), ("下", bleed_bottom), ("左", bleed_left), ("右", bleed_right)]:
+        for direction, val in [("上", bleed_top), ("下", bleed_bottom),
+                                ("左", bleed_left), ("右", bleed_right)]:
+            val = max(0.0, val)   # 負值視為 0（TrimBox 異常時保護）
             if required == 0:
-                # 不要求出血時，任何值都通過
                 result.add(f"出血值（{direction}）", f"{val} mm", Status.PASS)
             elif val >= required:
-                # 等於或超過規格都算通過（超出不扣分）
                 result.add(f"出血值（{direction}）", f"{val} mm", Status.PASS)
             elif val >= required * 0.7:
                 result.add(f"出血值（{direction}）", f"{val} mm（略不足，需 {required} mm）",
