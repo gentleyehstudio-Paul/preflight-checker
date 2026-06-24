@@ -173,15 +173,17 @@ class PreflightChecker:
     def check_color_mode(self) -> CheckResult:
         result = CheckResult(module="色彩模式偵測", status=Status.PASS)
         page_count = len(self.doc)
-        rgb_images = 0
-        rgb_pages  = []
-        has_spot   = False
-        icc_names  = set()
+        rgb_images  = 0
+        rgb_pages   = []
+        rgb_vectors = 0          # 向量 RGB 填色（rg/RG 指令）
+        rgb_vec_pages = []
+        has_spot    = False
+        icc_names   = set()
 
         for page_num in range(page_count):
             page = self.doc[page_num]
 
-            # get_images() 比 get_xobjects() 更可靠，能取得真實色彩空間資訊
+            # ── 1. 點陣影像色彩空間掃描（get_images 最可靠）──────
             for img in page.get_images(full=True):
                 xref = img[0]
                 try:
@@ -189,12 +191,12 @@ class PreflightChecker:
                     if not img_info:
                         continue
 
-                    cs_num  = img_info.get("colorspace", 0)   # 1=Gray, 3=RGB, 4=CMYK
+                    cs_num  = img_info.get("colorspace", 0)
                     cs_name = (img_info.get("cs-name") or "").lower()
 
                     is_rgb = (
-                        cs_num == 3                        # colorspace 數值判斷
-                        or "rgb"  in cs_name               # cs-name 含 rgb（含 sRGB, ICCBased(RGB,...)）
+                        cs_num == 3
+                        or "rgb"  in cs_name
                         or "srgb" in cs_name
                     )
 
@@ -203,18 +205,27 @@ class PreflightChecker:
                         if page_num + 1 not in rgb_pages:
                             rgb_pages.append(page_num + 1)
 
-                    # 從 cs-name 擷取 ICC Profile 名稱供報告顯示
-                    if cs_name and "icc" not in cs_name and "gray" not in cs_name:
+                    if cs_name and "gray" not in cs_name:
                         if "japan color" in cs_name or "japan" in cs_name:
                             icc_names.add("Japan Color 2001 Coated")
                         elif "srgb" in cs_name or "rgb" in cs_name:
                             icc_names.add("sRGB IEC61966-2.1")
-                        elif "cmyk" in cs_name:
-                            icc_names.add(cs_name.split("(")[0].strip())
                 except Exception:
                     pass
 
-            # Spot / DeviceN 特別色偵測（從頁面資源字典）
+            # ── 2. 向量色彩指令掃描（content stream）────────────
+            # rg / RG = RGB 填色/描邊；cs/CS + scn/SCN 也可能帶 RGB
+            try:
+                content = page.read_contents().decode("latin-1", errors="replace")
+                # rg = RGB 非描邊；RG = RGB 描邊
+                if re.search(r'[\d.]+\s+[\d.]+\s+[\d.]+\s+(?:rg|RG)\b', content):
+                    rgb_vectors += 1
+                    if page_num + 1 not in rgb_vec_pages:
+                        rgb_vec_pages.append(page_num + 1)
+            except Exception:
+                pass
+
+            # ── 3. Spot / DeviceN 特別色偵測 ─────────────────────
             try:
                 xref_id = page.xref
                 if xref_id > 0:
@@ -224,11 +235,11 @@ class PreflightChecker:
             except Exception:
                 pass
 
-        # ICC Profile 也從 metadata 補充判斷
+        # ── ICC Profile 補充（metadata）──────────────────────────
         try:
-            meta    = self.doc.metadata
-            creator = meta.get("creator", "")
-            producer= meta.get("producer", "")
+            meta     = self.doc.metadata
+            creator  = meta.get("creator", "")
+            producer = meta.get("producer", "")
             if "Japan Color" in producer or "Japan Color" in creator:
                 icc_names.add("Japan Color 2001 Coated")
         except Exception:
@@ -236,18 +247,27 @@ class PreflightChecker:
 
         icc_display = ", ".join(icc_names) if icc_names else "未偵測到"
 
-        # ── 判斷輸出 ──────────────────────────────────
-        if rgb_images == 0:
+        # ── 合計並輸出 ──────────────────────────────────────────
+        total_rgb = rgb_images + rgb_vectors
+        all_rgb_pages = sorted(set(rgb_pages + rgb_vec_pages))
+
+        if total_rgb == 0:
             result.add("色彩空間", "CMYK（符合印刷要求）", Status.PASS)
             result.add("RGB 物件數量", "0 個", Status.PASS)
-        elif rgb_images <= 3:
+        elif total_rgb <= 3:
             result.add("色彩空間", "CMYK + RGB 混用", Status.WARNING,
-                       "建議將 RGB 影像轉換為 CMYK")
-            result.add("RGB 物件數量", f"{rgb_images} 個（頁面：{rgb_pages}）", Status.WARNING)
+                       "建議將 RGB 色彩全數轉換為 CMYK")
+            detail = []
+            if rgb_images:  detail.append(f"點陣影像 {rgb_images} 個")
+            if rgb_vectors: detail.append(f"向量填色 {rgb_vectors} 頁（頁面：{rgb_vec_pages}）")
+            result.add("RGB 物件數量", f"{total_rgb} 個（{'、'.join(detail)}）", Status.WARNING)
         else:
             result.add("色彩空間", "RGB（不符印刷要求）", Status.FAIL,
-                       "所有影像必須轉換為 CMYK 才能正確印刷")
-            result.add("RGB 物件數量", f"{rgb_images} 個（影響頁面：{rgb_pages}）", Status.FAIL)
+                       "所有色彩必須轉換為 CMYK 才能正確印刷")
+            detail = []
+            if rgb_images:  detail.append(f"點陣影像 {rgb_images} 個")
+            if rgb_vectors: detail.append(f"向量填色 {rgb_vectors} 頁（頁面：{rgb_vec_pages}）")
+            result.add("RGB 物件數量", f"{total_rgb} 個（{'、'.join(detail)}）", Status.FAIL)
 
         result.add("Spot Color（特別色）", "有" if has_spot else "未偵測到",
                    Status.WARNING if has_spot else Status.PASS,
@@ -365,35 +385,31 @@ class PreflightChecker:
 
         else:
             # 情境 C：TrimBox 未設定（AI 檔常見）
-            # MediaBox 本身即為畫布大小，以規格成品尺寸反推出血量
-            # → 計算 MediaBox 比規格尺寸多出多少
+            # MediaBox 本身即為含出血的畫布，以規格成品尺寸計算多出的出血量
             spec_w_pt = self.spec_w * self.PT_PER_MM
             spec_h_pt = self.spec_h * self.PT_PER_MM
             media_w_pt = media.width
             media_h_pt = media.height
 
-            # 判斷方向（直式或橫式）
-            if abs(media_w_pt - spec_w_pt) <= 2 and abs(media_h_pt - spec_h_pt) <= 2:
-                # MediaBox 剛好等於成品尺寸 → 出血為 0
-                extra_w = extra_h = 0.0
-            elif abs(media_w_pt - spec_h_pt) <= 2 and abs(media_h_pt - spec_w_pt) <= 2:
-                # 橫式：MediaBox 剛好等於成品尺寸（旋轉） → 出血為 0
-                extra_w = extra_h = 0.0
+            # 自動判斷直式或橫式：選差值較小（更接近規格）的方向
+            diff_normal  = abs(media_w_pt - spec_w_pt) + abs(media_h_pt - spec_h_pt)
+            diff_rotated = abs(media_w_pt - spec_h_pt) + abs(media_h_pt - spec_w_pt)
+
+            if diff_rotated < diff_normal:
+                # 橫式：用旋轉後的規格計算
+                extra_w = max(0.0, media_w_pt - spec_h_pt) / 2
+                extra_h = max(0.0, media_h_pt - spec_w_pt) / 2
             else:
-                # MediaBox 比規格大 → 多出的部分均分為出血
+                # 直式（預設）
                 extra_w = max(0.0, media_w_pt - spec_w_pt) / 2
                 extra_h = max(0.0, media_h_pt - spec_h_pt) / 2
-                # 也試橫式
-                if extra_w == 0 and extra_h == 0:
-                    extra_w = max(0.0, media_w_pt - spec_h_pt) / 2
-                    extra_h = max(0.0, media_h_pt - spec_w_pt) / 2
 
             bleed_left = bleed_right = self._pt_to_mm(extra_w)
             bleed_top  = bleed_bottom = self._pt_to_mm(extra_h)
 
-            result.add("BleedBox",  "未設定", Status.PASS,
+            result.add("BleedBox", "未設定", Status.PASS,
                        "建議存檔時設定 BleedBox，部分 RIP 系統需要此欄位")
-            result.add("TrimBox",   "未設定（以成品規格反推出血量）", Status.PASS,
+            result.add("TrimBox",  "未設定（以成品規格反推出血量）", Status.PASS,
                        f"系統以規格尺寸 {self.spec_w}×{self.spec_h} mm 計算 MediaBox 多出的出血量")
 
         # ── 四邊判定 ────────────────────────────────────────
