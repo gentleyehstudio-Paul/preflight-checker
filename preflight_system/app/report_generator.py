@@ -119,6 +119,7 @@ def generate_pdf_report(
     spec_name:  str   = "A4",
     bleed_mm:   float = 3.0,
     min_dpi:    int   = 300,
+    max_tac:    int   = 250,
 ):
     page_w, page_h = A4
     margin = 20 * mm
@@ -175,6 +176,7 @@ def generate_pdf_report(
         ["稿件檔名", report.filename,  "校稿時間", datetime.now().strftime("%Y-%m-%d  %H:%M")],
         ["檔案格式", report.file_format, "成品規格", spec_name],
         ["要求出血", f"{bleed_mm} mm",   "最低解析度", f"{min_dpi} DPI"],
+        ["TAC 上限", f"{max_tac}%",      "", ""],
     ]
     info_table = Table(
         info_data,
