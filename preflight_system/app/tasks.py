@@ -74,6 +74,7 @@ def run_preflight_task(
     spec_height:float = 0,
     bleed_mm:   float = 3.0,
     min_dpi:    int   = 300,
+    max_tac:    int   = 250,
     gen_report: bool  = True,
 ):
     """
@@ -106,7 +107,7 @@ def run_preflight_task(
             "progress": 20, "stage": "色彩模式偵測",
         })
 
-        checker = PreflightChecker(file_path, w, h, bleed_mm, min_dpi)
+        checker = PreflightChecker(file_path, w, h, bleed_mm, min_dpi, max_tac=max_tac)
 
         if checker.doc is None:
             # 檔案無法開啟（例如 .ai 未啟用 PDF Compatible File）
