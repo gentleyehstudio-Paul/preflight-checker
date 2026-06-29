@@ -411,13 +411,59 @@ class PreflightChecker:
 
     def _content_bbox(self, page, dpi: int = 200):
         """
-        點陣化頁面，回傳實際有顏色（非白底）內容的邊界框（PDF 點座標 fitz.Rect）。
-        回傳 None 表示整頁空白。
+        取得「實際印墨內容」的邊界框（PDF 點座標 fitz.Rect），None 表示空白。
+
+        ★ 以物件幾何為主：向量路徑（get_drawings，含巢狀 XObject，且不受畫板裁切）
+          ＋影像＋文字。這能讀到「畫板剛好等於成品尺寸、但圖形其實畫超出畫板、
+          輸出時被裁掉」的情況——點陣化看不到被裁掉的部分，幾何座標看得到。
+          範圍夾在 MediaBox 外擴 30mm 內，避免異常裁切框／離版物件灌爆數值。
+          若完全無向量／文字／影像資訊（純點陣壓平稿），退回點陣化偵測。
         """
+        media  = page.mediabox
+        margin = 30 * self.PT_PER_MM
+        clamp  = fitz.Rect(media.x0 - margin, media.y0 - margin,
+                           media.x1 + margin, media.y1 + margin)
+        bbox = None
+
+        def _acc(r):
+            nonlocal bbox
+            try:
+                rr = fitz.Rect(r)
+            except Exception:
+                return
+            if rr.is_empty or rr.is_infinite:
+                return
+            rr = rr & clamp
+            if rr.is_empty:
+                return
+            bbox = rr if bbox is None else (bbox | rr)
+
+        try:
+            for d in page.get_drawings():
+                _acc(d.get("rect"))
+        except Exception:
+            pass
+        try:
+            for info in page.get_image_info(xrefs=True):
+                _acc(info.get("bbox"))
+        except Exception:
+            pass
+        try:
+            for blk in page.get_text("dict").get("blocks", []):
+                _acc(blk.get("bbox"))
+        except Exception:
+            pass
+
+        if bbox is not None and not bbox.is_empty:
+            return bbox
+        return self._content_bbox_raster(page, dpi)
+
+    def _content_bbox_raster(self, page, dpi: int = 200):
+        """後備：點陣化頁面，回傳非白底內容邊界框（會被畫板裁切，僅作備援）。"""
         zoom = dpi / 72.0
         pix  = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
         arr  = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-        ink  = (arr[:, :, :3] < 245).any(axis=2)   # 與白底差異 → 視為有墨
+        ink  = (arr[:, :, :3] < 245).any(axis=2)
         if not ink.any():
             return None
         rows = np.where(ink.any(axis=1))[0]
