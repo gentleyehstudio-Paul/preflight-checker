@@ -339,25 +339,26 @@ class PreflightChecker:
 
     def check_bleed(self) -> CheckResult:
         """
-        出血檢查（肉眼式 / 內容導向）：
-        以校稿人員的視覺判斷為準 —— 將頁面點陣化，找出「實際有顏色的內容」
-        邊界框，量測內容在各邊超出裁切線多少；達到要求出血量即通過。
+        出血檢查（雙層・肉眼模式）：
 
-        ★ 修正：不再單純依賴 BleedBox / TrimBox 的框線設定
-          （AI 存檔時這兩個欄位常缺失或不準），改以實際墨色延伸範圍判斷。
+        第一層 內容分析（Content Analysis）：
+            分析所有向量／影像／文字物件的實際幾何覆蓋範圍，計算「實際出血」，
+            不依賴 BleedBox / TrimBox 設定。
+        第二層 視覺模擬（Visual Inspection）：
+            將畫布往外擴張後以 300 dpi 光柵化，以像素檢查裁切線外是否有實際墨色，
+            可還原「畫板等於成品尺寸、超出畫板的圖在輸出時被裁切」的情況，
+            模擬人眼把畫板拉開後看到的出血覆蓋。
 
-        裁切線（成品框）來源：
-            有有效 TrimBox → 用 TrimBox
-            否則           → 以成品尺寸置中於 MediaBox 推算
+        最終以兩層中「較大」的出血覆蓋為準（任一層達標即視為有出血）。
         """
         result   = CheckResult(module="出血設定檢查", status=Status.PASS)
         page     = self.doc[0]
         media    = page.mediabox
         trim     = page.trimbox
         required = self.bleed_mm
-        TOL_MM   = 0.3   # 點陣量測容差（約 1~2 px @200dpi）
+        TOL_MM   = 0.3
 
-        # ── 決定裁切線 ──────────────────────────────────────
+        # ── 決定裁切線（成品框）─────────────────────────────
         trimbox_is_set = (
             abs(trim.x0 - media.x0) > 0.5 or abs(trim.y0 - media.y0) > 0.5 or
             abs(trim.x1 - media.x1) > 0.5 or abs(trim.y1 - media.y1) > 0.5
@@ -370,28 +371,43 @@ class PreflightChecker:
             sh = self.spec_h * self.PT_PER_MM
             if (abs(media.width - sh) + abs(media.height - sw)
                     < abs(media.width - sw) + abs(media.height - sh)):
-                sw, sh = sh, sw   # 橫式
+                sw, sh = sh, sw
             cx = (media.x0 + media.x1) / 2
             cy = (media.y0 + media.y1) / 2
             trim_rect = fitz.Rect(cx - sw / 2, cy - sh / 2, cx + sw / 2, cy + sh / 2)
             src = "成品尺寸置中推算"
         result.add("裁切線來源", src, Status.PASS)
 
-        # ── 點陣化，取實際內容邊界框 ────────────────────────
-        content = self._content_bbox(page, dpi=200)
-        if content is None:
-            result.add("內容偵測", "頁面無可見內容", Status.WARNING,
-                       "無法以視覺方式判斷出血，請確認檔案是否為空白")
+        # ── 兩層內容範圍 ────────────────────────────────────
+        expand = max(required, 3.0) + 5.0   # 視覺層往外掃描帶（mm）
+        geo = self._content_bbox_geometry(page)
+        vis = self._content_bbox_visual(page, dpi=300, expand_mm=expand)
+
+        layers = []
+        if geo is not None:
+            layers.append("Artwork 幾何")
+        if vis is not None:
+            layers.append("Pixel 掃描")
+        if not layers:
+            result.add("內容偵測", "裁切線內外均無可見內容", Status.WARNING,
+                       "頁面可能為空白，無法判斷出血")
             return result
+        result.add("判斷依據", " ＋ ".join(layers), Status.PASS,
+                   "取兩層中較大的出血覆蓋為準")
 
-        sides = {
-            "上": self._pt_to_mm(content.y1 - trim_rect.y1),
-            "下": self._pt_to_mm(trim_rect.y0 - content.y0),
-            "左": self._pt_to_mm(trim_rect.x0 - content.x0),
-            "右": self._pt_to_mm(content.x1 - trim_rect.x1),
-        }
+        def _side_pt(direction):
+            vals = []
+            for cb in (geo, vis):
+                if cb is None:
+                    continue
+                if   direction == "上": vals.append(cb.y1 - trim_rect.y1)
+                elif direction == "下": vals.append(trim_rect.y0 - cb.y0)
+                elif direction == "左": vals.append(trim_rect.x0 - cb.x0)
+                else:                   vals.append(cb.x1 - trim_rect.x1)
+            return max(vals) if vals else 0.0
 
-        for direction, val in sides.items():
+        for direction in ("上", "下", "左", "右"):
+            val   = self._pt_to_mm(_side_pt(direction))
             shown = max(0.0, val)
             if required == 0:
                 result.add(f"出血量（{direction}）", f"{shown:.1f} mm", Status.PASS)
@@ -405,19 +421,15 @@ class PreflightChecker:
             else:
                 result.add(f"出血量（{direction}）",
                            f"{shown:.1f} mm（不足，需 {required} mm）",
-                           Status.FAIL, "內容未延伸到出血區，裁切後極可能露白邊")
+                           Status.FAIL, "裁切線外未偵測到足夠內容，裁切後極可能露白邊")
 
         return result
 
-    def _content_bbox(self, page, dpi: int = 200):
+    def _content_bbox_geometry(self, page):
         """
-        取得「實際印墨內容」的邊界框（PDF 點座標 fitz.Rect），None 表示空白。
-
-        ★ 以物件幾何為主：向量路徑（get_drawings，含巢狀 XObject，且不受畫板裁切）
-          ＋影像＋文字。這能讀到「畫板剛好等於成品尺寸、但圖形其實畫超出畫板、
-          輸出時被裁掉」的情況——點陣化看不到被裁掉的部分，幾何座標看得到。
-          範圍夾在 MediaBox 外擴 30mm 內，避免異常裁切框／離版物件灌爆數值。
-          若完全無向量／文字／影像資訊（純點陣壓平稿），退回點陣化偵測。
+        第一層：向量（get_drawings，含巢狀 XObject、不受畫板裁切）＋影像＋文字
+        的實際幾何覆蓋範圍。回傳 fitz.Rect 或 None（無內容）。範圍夾在
+        MediaBox 外擴 30mm 內，避免異常裁切框／離版垃圾物件灌爆數值。
         """
         media  = page.mediabox
         margin = 30 * self.PT_PER_MM
@@ -453,29 +465,40 @@ class PreflightChecker:
                 _acc(blk.get("bbox"))
         except Exception:
             pass
+        return bbox
 
-        if bbox is not None and not bbox.is_empty:
-            return bbox
-        return self._content_bbox_raster(page, dpi)
-
-    def _content_bbox_raster(self, page, dpi: int = 200):
-        """後備：點陣化頁面，回傳非白底內容邊界框（會被畫板裁切，僅作備援）。"""
-        zoom = dpi / 72.0
-        pix  = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-        arr  = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-        ink  = (arr[:, :, :3] < 245).any(axis=2)
-        if not ink.any():
+    def _content_bbox_visual(self, page, dpi: int = 300, expand_mm: float = 8.0):
+        """
+        第二層：把畫布往外擴張後光柵化，回傳實際墨色（非白底）的邊界框。
+        在獨立複本上操作（insert_pdf），避免更動主文件 MediaBox
+        ——後續尺寸檢查仍需讀到原始值。回傳 fitz.Rect 或 None。
+        """
+        try:
+            tmp = fitz.open()
+            tmp.insert_pdf(self.doc, from_page=page.number, to_page=page.number)
+            tp    = tmp[0]
+            media = fitz.Rect(tp.mediabox)
+            m     = expand_mm * self.PT_PER_MM
+            big   = fitz.Rect(media.x0 - m, media.y0 - m, media.x1 + m, media.y1 + m)
+            tp.set_mediabox(big)
+            zoom = dpi / 72.0
+            pix  = tp.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+            arr  = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+            ink  = (arr[:, :, :3] < 245).any(axis=2)
+            tmp.close()
+            if not ink.any():
+                return None
+            rows = np.where(ink.any(axis=1))[0]
+            cols = np.where(ink.any(axis=0))[0]
+            r0, r1 = int(rows[0]), int(rows[-1])
+            c0, c1 = int(cols[0]), int(cols[-1])
+            x0 = big.x0 + c0 / zoom
+            x1 = big.x0 + (c1 + 1) / zoom
+            y1 = big.y1 - r0 / zoom
+            y0 = big.y1 - (r1 + 1) / zoom
+            return fitz.Rect(x0, y0, x1, y1)
+        except Exception:
             return None
-        rows = np.where(ink.any(axis=1))[0]
-        cols = np.where(ink.any(axis=0))[0]
-        r0, r1 = int(rows[0]), int(rows[-1])
-        c0, c1 = int(cols[0]), int(cols[-1])
-        media = page.mediabox
-        x0 = media.x0 + c0 / zoom
-        x1 = media.x0 + (c1 + 1) / zoom
-        y1 = media.y1 - r0 / zoom
-        y0 = media.y1 - (r1 + 1) / zoom
-        return fitz.Rect(x0, y0, x1, y1)
     # ─────────────────────────────────────────
     # 4. 成品尺寸檢查
     # ─────────────────────────────────────────
