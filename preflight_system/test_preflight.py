@@ -384,10 +384,10 @@ def test_api():
                 files={"file": ("test.pdf", f, "application/pdf")})
         if r.status_code == 200:
             body = r.json()
-            has_results = len(body.get("results", [])) == 5
+            has_results = len(body.get("results", [])) == 6
             has_overall = body.get("overall") in ("pass","warn","fail")
             if has_results and has_overall:
-                ok(f"POST /preflight — 回傳 5 項結果，整體：{body['overall']}")
+                ok(f"POST /preflight — 回傳 6 項結果，整體：{body['overall']}")
             else:
                 ng("POST /preflight — 回應格式不符", str(body.keys()))
         else:
@@ -501,8 +501,8 @@ def test_edge_cases():
         }
         payload = json.dumps(d, ensure_ascii=False)
         parsed  = json.loads(payload)
-        if len(parsed["results"]) == 5:
-            ok(f"JSON 序列化完整性 — {len(payload)} 字元，5 項模組")
+        if len(parsed["results"]) == 6:
+            ok(f"JSON 序列化完整性 — {len(payload)} 字元，6 項模組")
         else:
             ng("JSON 模組數量不符")
     except Exception as e:
