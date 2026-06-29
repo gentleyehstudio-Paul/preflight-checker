@@ -1,40 +1,565 @@
-✓
-印刷廠校稿系統
-Prepress Preflight Checker v2.1 — PDF / Adobe Illustrator(.ai) · 同步 / 非同步雙模式
-上傳稿件
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>印刷廠校稿系統 · Prepress Preflight Checker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Mono:wght@400;500&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --void:#080810;
+    --void-2:#0e0e1a;
+    --panel:#13131f;
+    --panel-edge:rgba(201,168,76,.18);
+    --gold:#C9A84C;
+    --gold-soft:rgba(201,168,76,.12);
+    --purple:#6B5CE7;
+    --purple-soft:rgba(107,92,231,.14);
+    --ink:#EDEAE0;
+    --ink-dim:#9a978d;
+    --ink-faint:#5e5c55;
+    --pass:#3FB37F;
+    --warn:#E0A23C;
+    --fail:#E0504C;
+    --display:'Bebas Neue',sans-serif;
+    --mono:'DM Mono',ui-monospace,monospace;
+    --body:'Noto Sans TC',sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    font-family:var(--body);
+    background:var(--void);
+    color:var(--ink);
+    line-height:1.65;
+    min-height:100vh;
+    background-image:
+      radial-gradient(900px 500px at 82% -8%, var(--purple-soft), transparent 60%),
+      radial-gradient(700px 480px at 8% 4%, var(--gold-soft), transparent 55%);
+    background-attachment:fixed;
+  }
+  .wrap{max-width:880px;margin:0 auto;padding:clamp(24px,5vw,64px) clamp(18px,4vw,40px) 96px}
 
-📄
-上傳 PDF / AI 稿件
-點擊選擇或拖曳檔案 · 支援 .pdf / .ai · 可多選批次上傳
-檢查規格
-成品規格
-          A4 — 210 × 297 mm
-          A5 — 148 × 210 mm
-          A3 — 297 × 420 mm
-          名片 — 90 × 55 mm
-          DL 信封 — 210 × 99 mm
-          自訂尺寸
-         
-要求出血 (mm)
-          3 mm（標準）
-          2 mm（小版）
-          5 mm（大版）
-          0 mm（無出血）
-         
-最低解析度
-          300 DPI
-          150 DPI（看板）
-          600 DPI（精細）
-          1200 DPI（線稿）
-         
-TAC 總墨量上限（避免背印）
-          250%（本系統預設）
-          280%
-          300%（業界標準）
-          200%（嚴格）
-         
-處理模式
-⚡ 同步（即時）
-🔄 非同步（批次佇列）
-上傳後立即執行並等待結果，適合單份小檔（< 20 MB）。
-開始校稿 
+  /* ---------- header ---------- */
+  .eyebrow{
+    font-family:var(--mono);font-size:12px;letter-spacing:.32em;text-transform:uppercase;
+    color:var(--gold);display:flex;align-items:center;gap:10px;margin-bottom:18px;
+  }
+  .eyebrow::before{content:"";width:28px;height:1px;background:var(--gold);opacity:.6}
+  h1{
+    font-family:var(--display);font-weight:400;
+    font-size:clamp(46px,9vw,84px);line-height:.92;letter-spacing:.01em;
+    color:var(--ink);
+  }
+  h1 .zh{display:block;font-family:var(--body);font-weight:700;font-size:clamp(24px,5vw,38px);letter-spacing:.04em;margin-top:6px}
+  .sub{color:var(--ink-dim);font-size:14.5px;margin-top:16px;max-width:54ch}
+  .ver{font-family:var(--mono);color:var(--purple);font-size:13px}
+
+  /* ---------- section scaffold ---------- */
+  .section{margin-top:clamp(32px,5vw,52px)}
+  .section-label{
+    font-family:var(--mono);font-size:12px;letter-spacing:.22em;text-transform:uppercase;
+    color:var(--ink-dim);display:flex;align-items:baseline;gap:12px;margin-bottom:16px;
+  }
+  .section-label .idx{color:var(--gold);font-size:13px}
+
+  /* ---------- upload zone (signature element) ---------- */
+  .drop{
+    position:relative;overflow:hidden;
+    border:1.5px dashed var(--panel-edge);border-radius:16px;
+    background:linear-gradient(180deg,var(--void-2),var(--panel));
+    padding:clamp(34px,6vw,52px) 24px;text-align:center;cursor:pointer;
+    transition:border-color .2s,background .2s,transform .12s;
+  }
+  .drop:hover{border-color:rgba(201,168,76,.5)}
+  .drop:focus-visible{outline:2px solid var(--gold);outline-offset:3px}
+  .drop.drag{border-color:var(--gold);background:linear-gradient(180deg,#11111e,#181826)}
+  .drop .scan{
+    position:absolute;left:0;right:0;top:0;height:2px;
+    background:linear-gradient(90deg,transparent,var(--gold),transparent);
+    opacity:0;transform:translateY(0);
+  }
+  .drop.drag .scan{opacity:.9;animation:scan 1.1s linear infinite}
+  @keyframes scan{from{transform:translateY(0)}to{transform:translateY(220px)}}
+  .drop .ico{font-size:34px;display:block;margin-bottom:14px;filter:grayscale(.2)}
+  .drop .big{font-size:17px;font-weight:500;color:var(--ink)}
+  .drop .small{font-family:var(--mono);font-size:12.5px;color:var(--ink-faint);margin-top:8px;letter-spacing:.02em}
+  input[type=file]{display:none}
+
+  /* file chips */
+  .files{display:flex;flex-direction:column;gap:8px;margin-top:14px}
+  .chip{
+    display:flex;align-items:center;gap:12px;
+    background:var(--panel);border:1px solid var(--panel-edge);border-radius:10px;
+    padding:11px 14px;font-size:14px;
+  }
+  .chip .name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chip .sz{font-family:var(--mono);font-size:12px;color:var(--ink-dim)}
+  .chip .x{
+    border:none;background:none;color:var(--ink-faint);cursor:pointer;font-size:18px;
+    line-height:1;padding:0 4px;transition:color .15s;
+  }
+  .chip .x:hover{color:var(--fail)}
+  .chip .tag{font-family:var(--mono);font-size:11px;letter-spacing:.08em;color:var(--gold);
+    border:1px solid var(--panel-edge);border-radius:5px;padding:2px 7px;text-transform:uppercase}
+
+  /* ---------- spec grid ---------- */
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:560px){.grid{grid-template-columns:1fr}}
+  .field{display:flex;flex-direction:column;gap:8px}
+  .field > label{font-family:var(--mono);font-size:12px;letter-spacing:.08em;color:var(--ink-dim)}
+  .field .hint{font-size:11.5px;color:var(--ink-faint);font-family:var(--body)}
+  select,input[type=number]{
+    width:100%;appearance:none;
+    background:var(--panel);color:var(--ink);
+    border:1px solid var(--panel-edge);border-radius:10px;
+    padding:12px 14px;font-family:var(--body);font-size:14.5px;
+    transition:border-color .15s,box-shadow .15s;
+  }
+  select{
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23C9A84C' stroke-width='1.5' fill='none'/%3E%3C/svg%3E");
+    background-repeat:no-repeat;background-position:right 14px center;padding-right:38px;cursor:pointer;
+  }
+  select:focus,input[type=number]:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px var(--gold-soft)}
+  .custom-size{display:none;gap:10px;grid-column:1/-1}
+  .custom-size.on{display:grid;grid-template-columns:1fr auto 1fr}
+  .custom-size .mul{align-self:center;color:var(--ink-faint);font-family:var(--mono)}
+
+  /* ---------- mode toggle ---------- */
+  .modes{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media(max-width:480px){.modes{grid-template-columns:1fr}}
+  .mode{
+    border:1px solid var(--panel-edge);border-radius:12px;background:var(--panel);
+    padding:16px 18px;cursor:pointer;transition:border-color .15s,background .15s;
+  }
+  .mode:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+  .mode.on{border-color:var(--gold);background:linear-gradient(180deg,var(--void-2),#16131f)}
+  .mode .t{font-weight:500;font-size:15px;display:flex;align-items:center;gap:8px}
+  .mode.on.async .t{color:var(--purple)}
+  .mode .d{font-size:12.5px;color:var(--ink-dim);margin-top:6px}
+  .mode .dot{width:8px;height:8px;border-radius:50%;background:var(--ink-faint);margin-left:auto}
+  .mode.on .dot{background:var(--gold)}
+  .mode.on.async .dot{background:var(--purple)}
+
+  /* ---------- run button ---------- */
+  .run{
+    margin-top:28px;width:100%;border:none;cursor:pointer;
+    font-family:var(--mono);font-size:15px;letter-spacing:.14em;text-transform:uppercase;
+    background:var(--gold);color:#1a1505;
+    padding:17px;border-radius:12px;font-weight:500;
+    transition:filter .15s,transform .1s,opacity .15s;
+  }
+  .run:hover:not(:disabled){filter:brightness(1.08)}
+  .run:active:not(:disabled){transform:translateY(1px)}
+  .run:disabled{opacity:.4;cursor:not-allowed}
+  .run.async-mode{background:var(--purple);color:#f3f1ff}
+  .run .spin{display:none;width:15px;height:15px;border:2px solid rgba(0,0,0,.3);
+    border-top-color:#1a1505;border-radius:50%;vertical-align:-2px;margin-right:9px;animation:spin .7s linear infinite}
+  .run.busy .spin{display:inline-block}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* ---------- results ---------- */
+  .results{margin-top:clamp(32px,5vw,48px)}
+  .empty{
+    border:1px dashed var(--panel-edge);border-radius:14px;padding:34px 20px;text-align:center;
+    color:var(--ink-faint);font-size:14px;
+  }
+  .alert{
+    border:1px solid var(--fail);border-radius:12px;padding:16px 18px;
+    background:rgba(224,80,76,.08);color:#f0b8b6;font-size:14px;margin-bottom:16px;
+  }
+  .alert .how{display:block;color:var(--ink-dim);font-size:12.5px;margin-top:6px}
+  .rcard{
+    border:1px solid var(--panel-edge);border-radius:14px;background:var(--panel);
+    padding:18px 20px;margin-bottom:16px;
+  }
+  .rcard .rhead{display:flex;align-items:center;gap:12px;padding-bottom:14px;border-bottom:1px solid rgba(255,255,255,.05);margin-bottom:6px}
+  .rcard .rname{flex:1;font-weight:500;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .verdict{font-family:var(--mono);font-size:12px;letter-spacing:.08em;text-transform:uppercase;
+    padding:4px 10px;border-radius:6px;border:1px solid currentColor}
+  .verdict.pass{color:var(--pass)}.verdict.warn{color:var(--warn)}.verdict.fail{color:var(--fail)}
+  .check{display:flex;align-items:flex-start;gap:12px;padding:11px 0;border-bottom:1px solid rgba(255,255,255,.04)}
+  .check:last-child{border-bottom:none}
+  .check .mk{width:20px;height:20px;border-radius:50%;flex:none;display:grid;place-items:center;
+    font-size:12px;font-weight:700;margin-top:1px}
+  .mk.pass{background:rgba(63,179,127,.15);color:var(--pass)}
+  .mk.warn{background:rgba(224,162,60,.15);color:var(--warn)}
+  .mk.fail{background:rgba(224,80,76,.15);color:var(--fail)}
+  .check .cbody{flex:1}
+  .check .clabel{font-size:14px;color:var(--ink)}
+  .check .cdetail{font-size:12.5px;color:var(--ink-dim);margin-top:2px}
+  .raw{font-family:var(--mono);font-size:12px;color:var(--ink-dim);white-space:pre-wrap;
+    background:var(--void-2);border:1px solid var(--panel-edge);border-radius:10px;padding:14px;overflow:auto}
+
+  footer{margin-top:60px;text-align:center;font-family:var(--mono);font-size:11.5px;
+    letter-spacing:.1em;color:var(--ink-faint)}
+
+  @media(prefers-reduced-motion:reduce){
+    *{animation:none!important;transition:none!important}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">Prepress Preflight · 印前自動校稿</div>
+    <h1>PREFLIGHT<span class="zh">印刷廠校稿系統</span></h1>
+    <p class="sub">
+      <span class="ver">v2.1</span> — 支援 PDF / Adobe Illustrator(.ai)，自動檢查色彩模式、字體外框、出血、解析度與總墨量，並提供同步即時與非同步批次雙模式。
+    </p>
+  </header>
+
+  <!-- 上傳 -->
+  <section class="section">
+    <div class="section-label"><span class="idx">01</span> 上傳稿件</div>
+    <div class="drop" id="drop" tabindex="0" role="button" aria-label="選擇或拖曳稿件">
+      <span class="scan"></span>
+      <span class="ico">📄</span>
+      <span class="big">點擊選擇，或將稿件拖曳到這裡</span>
+      <span class="small">支援 .pdf / .ai · 可多選批次上傳</span>
+    </div>
+    <input type="file" id="file" accept=".pdf,.ai,application/pdf,application/illustrator" multiple>
+    <div class="files" id="files"></div>
+  </section>
+
+  <!-- 規格 -->
+  <section class="section">
+    <div class="section-label"><span class="idx">02</span> 檢查規格</div>
+    <div class="grid">
+      <div class="field">
+        <label for="size">成品規格</label>
+        <select id="size">
+          <option value="A4|210|297">A4 — 210 × 297 mm</option>
+          <option value="A5|148|210">A5 — 148 × 210 mm</option>
+          <option value="A3|297|420">A3 — 297 × 420 mm</option>
+          <option value="card|90|55">名片 — 90 × 55 mm</option>
+          <option value="DL|210|99">DL 信封 — 210 × 99 mm</option>
+          <option value="custom|0|0">自訂尺寸…</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="bleed">要求出血 (mm)</label>
+        <select id="bleed">
+          <option value="3">3 mm（標準）</option>
+          <option value="2">2 mm（小版）</option>
+          <option value="5">5 mm（大版）</option>
+          <option value="0">0 mm（無出血）</option>
+        </select>
+      </div>
+
+      <div class="field custom-size" id="customSize">
+        <input type="number" id="cw" placeholder="寬 (mm)" min="1" step="0.1">
+        <span class="mul">×</span>
+        <input type="number" id="ch" placeholder="高 (mm)" min="1" step="0.1">
+      </div>
+
+      <div class="field">
+        <label for="dpi">最低解析度</label>
+        <select id="dpi">
+          <option value="300">300 DPI</option>
+          <option value="150">150 DPI（看板）</option>
+          <option value="600">600 DPI（精細）</option>
+          <option value="1200">1200 DPI（線稿）</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="tac">TAC 總墨量上限</label>
+        <select id="tac">
+          <option value="250">250%（本系統預設）</option>
+          <option value="280">280%</option>
+          <option value="300">300%（業界標準）</option>
+          <option value="200">200%（嚴格）</option>
+        </select>
+        <span class="hint">避免油墨過厚造成背印、沾髒</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 模式 -->
+  <section class="section">
+    <div class="section-label"><span class="idx">03</span> 處理模式</div>
+    <div class="modes">
+      <div class="mode sync on" id="modeSync" tabindex="0" role="button" aria-pressed="true">
+        <div class="t">⚡ 同步（即時）<span class="dot"></span></div>
+        <div class="d">上傳後立即執行並等待結果，適合單份小檔（&lt; 20 MB）。</div>
+      </div>
+      <div class="mode async" id="modeAsync" tabindex="0" role="button" aria-pressed="false">
+        <div class="t">🔄 非同步（批次佇列）<span class="dot"></span></div>
+        <div class="d">送入背景佇列處理，適合大檔或多檔，可離開頁面稍後查看。</div>
+      </div>
+    </div>
+    <button class="run" id="run" disabled>
+      <span class="spin"></span><span id="runText">開始校稿</span>
+    </button>
+  </section>
+
+  <!-- 結果 -->
+  <section class="results" id="results" aria-live="polite">
+    <div class="empty" id="empty">尚未上傳稿件。選好檔案與規格後按「開始校稿」，結果會出現在這裡。</div>
+  </section>
+
+  <footer>居葉國際文化有限公司 · GENTLE YEH STUDIO</footer>
+</div>
+
+<script>
+/* =========================================================
+   CONFIG — 後端對接設定（只有這一塊跟你的 FastAPI 路由相關）
+   如果你的 main.py 路由名稱不同，改這裡即可。
+   欄位名 (FIELD) 是送進後端 FormData 的 key，照你後端接收的改。
+   ========================================================= */
+const CONFIG = {
+  ENDPOINT: {
+    syncCheck:   '/api/preflight',          // POST multipart → 回 JSON 結果
+    asyncSubmit: '/api/preflight/async',    // POST multipart → 回 { job_id }
+    asyncStatus: '/api/preflight/status',   // GET ?job_id= → 回 { status, result }
+  },
+  FIELD: {
+    files: 'files',     // 檔案欄位（多檔同名）
+    size:  'size',      // 規格代號，如 A4
+    width: 'width_mm',  // 自訂寬
+    height:'height_mm', // 自訂高
+    bleed: 'bleed_mm',
+    dpi:   'min_dpi',
+    tac:   'max_tac',
+    mode:  'mode',      // 'sync' | 'async'
+  },
+  POLL_MS: 2500,        // 非同步輪詢間隔
+  POLL_MAX: 120,        // 最多輪詢次數
+};
+
+/* ---------- 狀態 ---------- */
+let selected = [];           // File[]
+let mode = 'sync';
+
+/* ---------- DOM ---------- */
+const $ = s => document.querySelector(s);
+const drop = $('#drop'), fileInput = $('#file'), filesBox = $('#files');
+const sizeSel = $('#size'), customSize = $('#customSize'), cw = $('#cw'), ch = $('#ch');
+const runBtn = $('#run'), runText = $('#runText');
+const results = $('#results'), empty = $('#empty');
+const modeSync = $('#modeSync'), modeAsync = $('#modeAsync');
+
+/* ---------- 檔案選擇 ---------- */
+drop.addEventListener('click', () => fileInput.click());
+drop.addEventListener('keydown', e => { if(e.key==='Enter'||e.key===' '){e.preventDefault();fileInput.click();} });
+fileInput.addEventListener('change', () => addFiles(fileInput.files));
+
+['dragenter','dragover'].forEach(ev =>
+  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('drag'); }));
+['dragleave','drop'].forEach(ev =>
+  drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('drag'); }));
+drop.addEventListener('drop', e => addFiles(e.dataTransfer.files));
+
+function addFiles(list){
+  for(const f of list){
+    const ok = /\.(pdf|ai)$/i.test(f.name);
+    if(ok && !selected.some(s => s.name===f.name && s.size===f.size)) selected.push(f);
+  }
+  renderFiles();
+}
+function renderFiles(){
+  filesBox.innerHTML = '';
+  selected.forEach((f,i) => {
+    const ext = (f.name.split('.').pop()||'').toUpperCase();
+    const el = document.createElement('div');
+    el.className = 'chip';
+    el.innerHTML = `<span class="tag">${ext}</span>
+      <span class="name">${escapeHtml(f.name)}</span>
+      <span class="sz">${fmtSize(f.size)}</span>
+      <button class="x" aria-label="移除" data-i="${i}">×</button>`;
+    filesBox.appendChild(el);
+  });
+  filesBox.querySelectorAll('.x').forEach(b =>
+    b.addEventListener('click', () => { selected.splice(+b.dataset.i,1); renderFiles(); }));
+  runBtn.disabled = selected.length === 0;
+}
+
+/* ---------- 自訂尺寸 ---------- */
+sizeSel.addEventListener('change', () => {
+  customSize.classList.toggle('on', sizeSel.value.startsWith('custom'));
+});
+
+/* ---------- 模式切換 ---------- */
+function setMode(m){
+  mode = m;
+  modeSync.classList.toggle('on', m==='sync');
+  modeAsync.classList.toggle('on', m==='async');
+  modeSync.setAttribute('aria-pressed', m==='sync');
+  modeAsync.setAttribute('aria-pressed', m==='async');
+  runBtn.classList.toggle('async-mode', m==='async');
+  runText.textContent = m==='async' ? '送入批次佇列' : '開始校稿';
+}
+modeSync.addEventListener('click', () => setMode('sync'));
+modeAsync.addEventListener('click', () => setMode('async'));
+[modeSync,modeAsync].forEach(el =>
+  el.addEventListener('keydown', e => { if(e.key==='Enter'||e.key===' '){e.preventDefault();el.click();} }));
+
+/* ---------- 送出 ---------- */
+runBtn.addEventListener('click', run);
+
+function buildForm(){
+  const fd = new FormData();
+  selected.forEach(f => fd.append(CONFIG.FIELD.files, f));
+  const [code, w, h] = sizeSel.value.split('|');
+  fd.append(CONFIG.FIELD.size, code);
+  if(code === 'custom'){
+    fd.append(CONFIG.FIELD.width,  cw.value || '');
+    fd.append(CONFIG.FIELD.height, ch.value || '');
+  } else {
+    fd.append(CONFIG.FIELD.width,  w);
+    fd.append(CONFIG.FIELD.height, h);
+  }
+  fd.append(CONFIG.FIELD.bleed, $('#bleed').value);
+  fd.append(CONFIG.FIELD.dpi,   $('#dpi').value);
+  fd.append(CONFIG.FIELD.tac,   $('#tac').value);
+  fd.append(CONFIG.FIELD.mode,  mode);
+  return fd;
+}
+
+async function run(){
+  if(selected.length === 0) return;
+  if(sizeSel.value.startsWith('custom') && (!cw.value || !ch.value)){
+    return showError('尚未填寫自訂尺寸。', '在「成品規格」下方輸入寬與高（mm）後再送出。');
+  }
+  busy(true); clearResults();
+  try{
+    if(mode === 'sync'){
+      const r = await fetch(CONFIG.ENDPOINT.syncCheck, { method:'POST', body:buildForm() });
+      const data = await parse(r);
+      renderResults(data);
+    } else {
+      const r = await fetch(CONFIG.ENDPOINT.asyncSubmit, { method:'POST', body:buildForm() });
+      const sub = await parse(r);
+      const jobId = sub.job_id || sub.id || sub.task_id;
+      if(!jobId) throw new Error('後端未回傳 job_id，無法追蹤批次進度。');
+      await poll(jobId);
+    }
+  }catch(err){
+    showError('校稿請求失敗。', err.message + '　·　請確認後端服務已啟動，且上方 CONFIG 的路由名稱與 main.py 一致。');
+  }finally{
+    busy(false);
+  }
+}
+
+async function poll(jobId){
+  showInfo(`已送入佇列（job ${jobId}），背景處理中…`);
+  for(let i=0;i<CONFIG.POLL_MAX;i++){
+    await sleep(CONFIG.POLL_MS);
+    const url = `${CONFIG.ENDPOINT.asyncStatus}?job_id=${encodeURIComponent(jobId)}`;
+    const r = await fetch(url);
+    const d = await parse(r);
+    const st = (d.status||'').toLowerCase();
+    if(['done','success','finished','completed'].includes(st)){
+      return renderResults(d.result ?? d.results ?? d);
+    }
+    if(['failed','error'].includes(st)){
+      throw new Error(d.message || d.error || '批次處理失敗。');
+    }
+    showInfo(`處理中… ${d.progress!=null ? d.progress+'%' : '('+(i+1)+')'}`);
+  }
+  throw new Error('等待逾時。檔案可能仍在處理，稍後重新查詢。');
+}
+
+/* ---------- 結果渲染（容錯：對得上就漂亮顯示，對不上就顯示原始 JSON） ---------- */
+const LABELS = {
+  color:'色彩模式 (CMYK)', color_mode:'色彩模式 (CMYK)', cmyk:'色彩模式 (CMYK)',
+  font:'字體外框', fonts:'字體外框', font_outline:'字體外框', outline:'字體外框',
+  bleed:'出血', resolution:'解析度', dpi:'解析度', image_resolution:'解析度',
+  tac:'TAC 總墨量', ink:'TAC 總墨量', ink_coverage:'TAC 總墨量',
+  ai:'AI 檔支援', ai_support:'AI 檔支援', illustrator:'AI 檔支援',
+};
+function normStatus(s){
+  s = String(s||'').toLowerCase();
+  if(['pass','ok','success','true','good'].includes(s)) return 'pass';
+  if(['warn','warning','caution'].includes(s)) return 'warn';
+  if(['fail','error','false','bad','danger'].includes(s)) return 'fail';
+  return s==='true'?'pass':(s==='false'?'fail':'warn');
+}
+const MARK = { pass:'✓', warn:'!', fail:'×' };
+const VERDICT = { pass:'通過', warn:'注意', fail:'未過' };
+
+function renderResults(data){
+  clearResults();
+  let items = Array.isArray(data) ? data
+            : (data && Array.isArray(data.results)) ? data.results
+            : (data && Array.isArray(data.files)) ? data.files
+            : (data ? [data] : []);
+  if(items.length === 0){ return showInfo('沒有可顯示的結果。'); }
+
+  let unknown = false;
+  items.forEach(item => {
+    const card = document.createElement('div');
+    card.className = 'rcard';
+    const name = item.filename || item.name || item.file || '稿件';
+    const checks = item.checks || item.results || item.items;
+
+    if(!checks || typeof checks !== 'object'){ unknown = true; }
+
+    let rows = '', worst = 'pass';
+    if(checks){
+      const list = Array.isArray(checks)
+        ? checks.map(c => [c.name||c.key||c.label, c])
+        : Object.entries(checks);
+      list.forEach(([key,val]) => {
+        const status = normStatus(val && typeof val==='object' ? (val.status ?? val.result ?? val.pass) : val);
+        if(status==='fail') worst='fail';
+        else if(status==='warn' && worst!=='fail') worst='warn';
+        const label = LABELS[String(key).toLowerCase()] || key;
+        const detail = (val && typeof val==='object') ? (val.detail || val.message || val.msg || '') : '';
+        rows += `<div class="check">
+          <span class="mk ${status}">${MARK[status]}</span>
+          <span class="cbody"><span class="clabel">${escapeHtml(String(label))}</span>
+          ${detail?`<span class="cdetail">${escapeHtml(String(detail))}</span>`:''}</span></div>`;
+      });
+    }
+
+    card.innerHTML = `<div class="rhead">
+        <span class="rname">${escapeHtml(String(name))}</span>
+        <span class="verdict ${worst}">${VERDICT[worst]}</span>
+      </div>${rows || `<div class="raw">${escapeHtml(JSON.stringify(item,null,2))}</div>`}`;
+    results.appendChild(card);
+  });
+
+  if(unknown){
+    const note = document.createElement('div');
+    note.className = 'alert';
+    note.innerHTML = `結果已收到，但欄位結構跟前端預期的不同，已用原始 JSON 顯示。
+      <span class="how">把上面的 JSON 結構貼我，我幫你把 renderResults 對成漂亮的卡片。</span>`;
+    results.prepend(note);
+  }
+}
+
+/* ---------- UI 小工具 ---------- */
+function busy(on){ runBtn.classList.toggle('busy', on); runBtn.disabled = on || selected.length===0; }
+function clearResults(){ results.innerHTML=''; }
+function showInfo(msg){
+  clearResults();
+  const d = document.createElement('div'); d.className='empty'; d.textContent = msg;
+  results.appendChild(d);
+}
+function showError(what, how){
+  clearResults();
+  const d = document.createElement('div'); d.className='alert';
+  d.innerHTML = `${escapeHtml(what)}<span class="how">${escapeHtml(how)}</span>`;
+  results.appendChild(d);
+}
+function fmtSize(b){ return b>1048576 ? (b/1048576).toFixed(1)+' MB' : (b/1024).toFixed(0)+' KB'; }
+function escapeHtml(s){ return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+async function parse(r){
+  const text = await r.text();
+  let data; try{ data = JSON.parse(text); }catch{ data = text; }
+  if(!r.ok){
+    const m = (data && (data.detail||data.message||data.error)) || `HTTP ${r.status}`;
+    throw new Error(typeof m==='string'?m:JSON.stringify(m));
+  }
+  return data;
+}
+
+setMode('sync');
+</script>
+</body>
+</html>
