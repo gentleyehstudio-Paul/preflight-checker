@@ -19,6 +19,7 @@ import fitz          # PyMuPDF
 import re
 import struct
 import math
+import numpy as np
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
@@ -338,109 +339,97 @@ class PreflightChecker:
 
     def check_bleed(self) -> CheckResult:
         """
-        出血檢查邏輯：
-        以「視覺判斷」為核心 ——
-        只要 MediaBox（整個畫布）比規格成品尺寸大出足夠的出血量，就判定通過。
-        不依賴 TrimBox/BleedBox 的差值計算（這兩個欄位在 AI 存檔時常常缺失或不準確）。
+        出血檢查（肉眼式 / 內容導向）：
+        以校稿人員的視覺判斷為準 —— 將頁面點陣化，找出「實際有顏色的內容」
+        邊界框，量測內容在各邊超出裁切線多少；達到要求出血量即通過。
 
-        優先順序：
-          1. 有 BleedBox → 用 BleedBox vs TrimBox（最精確）
-          2. 有 TrimBox  → 用 TrimBox vs 規格，再跟 MediaBox 取較大值
-          3. 其他        → 直接用 MediaBox vs 規格（視覺邏輯）
+        ★ 修正：不再單純依賴 BleedBox / TrimBox 的框線設定
+          （AI 存檔時這兩個欄位常缺失或不準），改以實際墨色延伸範圍判斷。
+
+        裁切線（成品框）來源：
+            有有效 TrimBox → 用 TrimBox
+            否則           → 以成品尺寸置中於 MediaBox 推算
         """
-        result = CheckResult(module="出血設定檢查", status=Status.PASS)
-        page   = self.doc[0]
-        media  = page.mediabox
-        trim   = page.trimbox
+        result   = CheckResult(module="出血設定檢查", status=Status.PASS)
+        page     = self.doc[0]
+        media    = page.mediabox
+        trim     = page.trimbox
+        required = self.bleed_mm
+        TOL_MM   = 0.3   # 點陣量測容差（約 1~2 px @200dpi）
 
-        required    = self.bleed_mm
-        spec_w_pt   = self.spec_w * self.PT_PER_MM
-        spec_h_pt   = self.spec_h * self.PT_PER_MM
-
-        # ── 嘗試讀取 BleedBox ──────────────────────────────
-        bleed_box = None
-        try:
-            xref = page.xref
-            if xref > 0:
-                obj = self.doc.xref_object(xref)
-                if "/BleedBox" in obj:
-                    m = re.search(r"/BleedBox\s*\[([^\]]+)\]", obj)
-                    if m:
-                        vals = list(map(float, m.group(1).split()))
-                        bleed_box = fitz.Rect(vals)
-        except Exception:
-            pass
-
-        # ── 判斷 TrimBox 是否有意義（與 MediaBox 不同才算有效）
+        # ── 決定裁切線 ──────────────────────────────────────
         trimbox_is_set = (
-            abs(trim.x0 - media.x0) > 0.5 or
-            abs(trim.y0 - media.y0) > 0.5 or
-            abs(trim.x1 - media.x1) > 0.5 or
-            abs(trim.y1 - media.y1) > 0.5
+            abs(trim.x0 - media.x0) > 0.5 or abs(trim.y0 - media.y0) > 0.5 or
+            abs(trim.x1 - media.x1) > 0.5 or abs(trim.y1 - media.y1) > 0.5
         )
-
-        # ── 核心計算：MediaBox 比規格尺寸大多少 ────────────
-        # 自動判斷直式/橫式：選誤差較小的方向
-        diff_normal  = abs(media.width  - spec_w_pt) + abs(media.height - spec_h_pt)
-        diff_rotated = abs(media.width  - spec_h_pt) + abs(media.height - spec_w_pt)
-
-        if diff_rotated < diff_normal:
-            base_w, base_h = spec_h_pt, spec_w_pt   # 橫式
+        if trimbox_is_set:
+            trim_rect = fitz.Rect(trim)
+            src = "TrimBox（文件裁切框）"
         else:
-            base_w, base_h = spec_w_pt, spec_h_pt   # 直式
+            sw = self.spec_w * self.PT_PER_MM
+            sh = self.spec_h * self.PT_PER_MM
+            if (abs(media.width - sh) + abs(media.height - sw)
+                    < abs(media.width - sw) + abs(media.height - sh)):
+                sw, sh = sh, sw   # 橫式
+            cx = (media.x0 + media.x1) / 2
+            cy = (media.y0 + media.y1) / 2
+            trim_rect = fitz.Rect(cx - sw / 2, cy - sh / 2, cx + sw / 2, cy + sh / 2)
+            src = "成品尺寸置中推算"
+        result.add("裁切線來源", src, Status.PASS)
 
-        # MediaBox 超出成品規格的量（均分四邊）
-        media_bleed_w = max(0.0, media.width  - base_w) / 2
-        media_bleed_h = max(0.0, media.height - base_h) / 2
+        # ── 點陣化，取實際內容邊界框 ────────────────────────
+        content = self._content_bbox(page, dpi=200)
+        if content is None:
+            result.add("內容偵測", "頁面無可見內容", Status.WARNING,
+                       "無法以視覺方式判斷出血，請確認檔案是否為空白")
+            return result
 
-        # ── 選擇最終出血值：以最可靠的來源為準 ────────────
-        if bleed_box is not None and trimbox_is_set:
-            # 情境 A：BleedBox + TrimBox 都有 → 最精確
-            bl = self._pt_to_mm(trim.x0 - bleed_box.x0)
-            br = self._pt_to_mm(bleed_box.x1 - trim.x1)
-            bt = self._pt_to_mm(bleed_box.y1 - trim.y1)
-            bb = self._pt_to_mm(trim.y0 - bleed_box.y0)
-            result.add("出血來源", "BleedBox（最精確）", Status.PASS)
+        sides = {
+            "上": self._pt_to_mm(content.y1 - trim_rect.y1),
+            "下": self._pt_to_mm(trim_rect.y0 - content.y0),
+            "左": self._pt_to_mm(trim_rect.x0 - content.x0),
+            "右": self._pt_to_mm(content.x1 - trim_rect.x1),
+        }
 
-        elif trimbox_is_set:
-            # 情境 B：只有 TrimBox
-            # TrimBox 差值與 MediaBox 視覺值取較大者，避免 TrimBox 異常導致誤判
-            bl_trim = self._pt_to_mm(trim.x0 - media.x0)
-            br_trim = self._pt_to_mm(media.x1 - trim.x1)
-            bt_trim = self._pt_to_mm(media.y1 - trim.y1)
-            bb_trim = self._pt_to_mm(trim.y0 - media.y0)
-            mv      = self._pt_to_mm(min(media_bleed_w, media_bleed_h))
-            bl = max(bl_trim, 0.0, mv)
-            br = max(br_trim, 0.0, mv)
-            bt = max(bt_trim, 0.0, mv)
-            bb = max(bb_trim, 0.0, mv)
-            result.add("出血來源", "TrimBox + MediaBox 視覺值（取較大）", Status.PASS)
-
-        else:
-            # 情境 C：沒有 TrimBox / BleedBox → 純視覺邏輯
-            bl = br = self._pt_to_mm(media_bleed_w)
-            bt = bb = self._pt_to_mm(media_bleed_h)
-            result.add("出血來源", "MediaBox 視覺推算", Status.PASS,
-                       f"畫布寬 {self._pt_to_mm(media.width):.1f}mm，"
-                       f"規格 {self.spec_w}mm，"
-                       f"推算各邊出血 {self._pt_to_mm(media_bleed_w):.1f}mm")
-
-        # ── 四邊判定 ────────────────────────────────────────
-        for direction, val in [("上", bt), ("下", bb), ("左", bl), ("右", br)]:
-            val = max(0.0, val)
+        for direction, val in sides.items():
+            shown = max(0.0, val)
             if required == 0:
-                result.add(f"出血值（{direction}）", f"{val:.1f} mm", Status.PASS)
-            elif val >= required:
-                result.add(f"出血值（{direction}）", f"{val:.1f} mm", Status.PASS)
+                result.add(f"出血量（{direction}）", f"{shown:.1f} mm", Status.PASS)
+            elif val >= required - TOL_MM:
+                result.add(f"出血量（{direction}）", f"{shown:.1f} mm",
+                           Status.PASS, "內容已延伸超出裁切線達要求出血")
             elif val >= required * 0.7:
-                result.add(f"出血值（{direction}）", f"{val:.1f} mm（略不足，需 {required} mm）",
-                           Status.WARNING, "可能影響裁切安全距離")
+                result.add(f"出血量（{direction}）",
+                           f"{shown:.1f} mm（略不足，需 {required} mm）",
+                           Status.WARNING, "內容未完全延伸到出血線，裁切可能露白邊")
             else:
-                result.add(f"出血值（{direction}）", f"{val:.1f} mm（不足，需 {required} mm）",
-                           Status.FAIL, "出血不足，印刷裁切後可能出現白邊")
+                result.add(f"出血量（{direction}）",
+                           f"{shown:.1f} mm（不足，需 {required} mm）",
+                           Status.FAIL, "內容未延伸到出血區，裁切後極可能露白邊")
 
         return result
 
+    def _content_bbox(self, page, dpi: int = 200):
+        """
+        點陣化頁面，回傳實際有顏色（非白底）內容的邊界框（PDF 點座標 fitz.Rect）。
+        回傳 None 表示整頁空白。
+        """
+        zoom = dpi / 72.0
+        pix  = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        arr  = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+        ink  = (arr[:, :, :3] < 245).any(axis=2)   # 與白底差異 → 視為有墨
+        if not ink.any():
+            return None
+        rows = np.where(ink.any(axis=1))[0]
+        cols = np.where(ink.any(axis=0))[0]
+        r0, r1 = int(rows[0]), int(rows[-1])
+        c0, c1 = int(cols[0]), int(cols[-1])
+        media = page.mediabox
+        x0 = media.x0 + c0 / zoom
+        x1 = media.x0 + (c1 + 1) / zoom
+        y1 = media.y1 - r0 / zoom
+        y0 = media.y1 - (r1 + 1) / zoom
+        return fitz.Rect(x0, y0, x1, y1)
     # ─────────────────────────────────────────
     # 4. 成品尺寸檢查
     # ─────────────────────────────────────────
@@ -639,85 +628,106 @@ class PreflightChecker:
 
     def check_tac(self) -> CheckResult:
         """
-        Total Area Coverage (TAC) 檢查。
-        掃描 content stream 中的 CMYK 填色指令（k/K），
+        Total Area Coverage (TAC) 背印檢查。
+        掃描「頁面內容 + 所有 Form XObject」的 content stream，
+        擷取 CMYK 填色／描邊指令（k / K / 4 運算元 scn / SCN），
         計算 C+M+Y+K 總和，超過上限即警告或退稿。
 
-        背印（Back Trap）原因：
-            墨量過高 → 油墨未乾透 → 印到背面（背印）
-        建議上限：250%（本系統預設）
-        絕對上限：300%（業界標準，超過必退稿）
+        ★ 修正：Illustrator 存檔（.ai / PDF）會把實際圖形包進 Form XObject，
+          頁面層常只有 `/Fm0 Do`。舊版只掃頁面層 → 永遠抓到 0%。
+          本版遞迴掃描所有 Form XObject 串流，確實抓到向量 CMYK。
         """
         result = CheckResult(module="總墨量（TAC）背印檢查", status=Status.PASS)
 
-        warn_limit = self.max_tac       # 警告線（預設 250%）
-        fail_limit = max(300, self.max_tac + 50)  # 退稿線（不低於 300%）
+        warn_limit = self.max_tac
+        fail_limit = max(300, self.max_tac + 50)
 
-        max_found   = 0.0       # 全文件最高 TAC
-        over_warn   = []        # [(page, tac)] 超過警告線
-        over_fail   = []        # [(page, tac)] 超過退稿線
-        samples     = []        # 超標色值樣本
+        # c m y k 之後接 k / K（CMYK 填色／描邊）或 4 運算元 scn / SCN
+        cmyk_re = re.compile(
+            r'([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(?:k|K|scn|SCN)\b'
+        )
 
-        for page_num in range(len(self.doc)):
-            page = self.doc[page_num]
-            try:
-                content = page.read_contents().decode("latin-1", errors="replace")
-            except Exception:
-                continue
+        max_found = 0.0
+        over_warn = []
+        over_fail = []
+        samples   = []
 
-            # k = CMYK 填色；K = CMYK 描邊
-            # 格式：c m y k  k（或 K）
-            cmyk_ops = re.findall(
-                r'([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+[kK]\b',
-                content
-            )
-
-            for c, m, y, k in cmyk_ops:
-                tac = round((float(c) + float(m) + float(y) + float(k)) * 100, 1)
+        def _scan(text):
+            nonlocal max_found
+            for c, m, y, k in cmyk_re.findall(text):
+                try:
+                    tac = round((float(c) + float(m) + float(y) + float(k)) * 100, 1)
+                except ValueError:
+                    continue
+                if tac > 400:   # 真 CMYK 最高 400%；超過代表非 CMYK 的 4 運算元（如 DeviceN 特殊色），略過
+                    continue
                 if tac > max_found:
                     max_found = tac
+                label = (f"C{int(float(c)*100)}M{int(float(m)*100)}"
+                         f"Y{int(float(y)*100)}K{int(float(k)*100)}={tac:.0f}%")
                 if tac > fail_limit:
-                    over_fail.append((page_num + 1, tac))
+                    over_fail.append(tac)
                     if len(samples) < 3:
-                        samples.append(f"P{page_num+1}:C{int(float(c)*100)}M{int(float(m)*100)}"
-                                       f"Y{int(float(y)*100)}K{int(float(k)*100)}={tac:.0f}%")
+                        samples.append(label)
                 elif tac > warn_limit:
-                    over_warn.append((page_num + 1, tac))
+                    over_warn.append(tac)
                     if len(samples) < 3:
-                        samples.append(f"P{page_num+1}:C{int(float(c)*100)}M{int(float(m)*100)}"
-                                       f"Y{int(float(y)*100)}K{int(float(k)*100)}={tac:.0f}%")
+                        samples.append(label)
+
+        # ── 頁面內容 + 所有 Form XObject 串流（遞迴覆蓋巢狀結構）──
+        seen = set()
+        for page in self.doc:
+            for xref in page.get_contents():
+                if xref in seen:
+                    continue
+                seen.add(xref)
+                try:
+                    raw = self.doc.xref_stream(xref)
+                    if raw:
+                        _scan(raw.decode("latin-1", errors="replace"))
+                except Exception:
+                    pass
+        for xref in range(1, self.doc.xref_length()):
+            if xref in seen:
+                continue
+            try:
+                sub = self.doc.xref_get_key(xref, "Subtype")
+                if sub and sub[1] == "/Form":
+                    seen.add(xref)
+                    raw = self.doc.xref_stream(xref)
+                    if raw:
+                        _scan(raw.decode("latin-1", errors="replace"))
+            except Exception:
+                pass
 
         # ── 輸出 ──────────────────────────────────────────────
         result.add("TAC 上限設定", f"{warn_limit}%", Status.PASS)
         result.add("最高 TAC", f"{max_found:.0f}%",
-                   Status.PASS    if max_found <= warn_limit  else
-                   Status.WARNING if max_found <= fail_limit  else
+                   Status.PASS    if max_found <= warn_limit else
+                   Status.WARNING if max_found <= fail_limit else
                    Status.FAIL)
 
         if not over_fail and not over_warn:
-            result.add("超標物件", "0 個", Status.PASS,
-                       "所有向量色彩均在墨量上限內")
+            result.add("超標物件", "0 處", Status.PASS,
+                       "所有 CMYK 色彩均在墨量上限內")
         elif over_fail:
-            pages = sorted(set(p for p, _ in over_fail))
-            result.add(f"超過退稿線（{fail_limit}%）", f"{len(over_fail)} 個（頁面：{pages}）",
+            result.add(f"超過退稿線（{fail_limit}%）", f"{len(over_fail)} 處",
                        Status.FAIL,
                        f"範例：{'、'.join(samples[:2])}　|　背印風險極高，必須降低墨量")
             if over_warn:
-                wpages = sorted(set(p for p, _ in over_warn))
-                result.add(f"超過警告線（{warn_limit}%）", f"{len(over_warn)} 個（頁面：{wpages}）",
-                           Status.WARNING, "建議調整")
+                result.add(f"超過警告線（{warn_limit}%）", f"{len(over_warn)} 處",
+                           Status.WARNING, "建議一併調整")
         else:
-            pages = sorted(set(p for p, _ in over_warn))
-            result.add(f"超過警告線（{warn_limit}%）", f"{len(over_warn)} 個（頁面：{pages}）",
+            result.add(f"超過警告線（{warn_limit}%）", f"{len(over_warn)} 處",
                        Status.WARNING,
                        f"範例：{'、'.join(samples[:2])}　|　建議降低墨量以避免背印")
-            result.add(f"超過退稿線（{fail_limit}%）", "0 個", Status.PASS)
+            result.add(f"超過退稿線（{fail_limit}%）", "0 處", Status.PASS)
 
         if max_found == 0:
-            result.add("備註", "未偵測到 CMYK 向量指令（可能為純 RGB 或純文字）", Status.PASS)
+            result.add("備註", "未偵測到 CMYK 向量指令（可能為純 RGB、純文字或影像）",
+                       Status.PASS)
 
         return result
-
     # ─────────────────────────────────────────
     # 執行全部檢查
     # ─────────────────────────────────────────
