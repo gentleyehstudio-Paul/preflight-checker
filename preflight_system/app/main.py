@@ -72,6 +72,7 @@ async def run_preflight_sync(
     spec_height: float = Form(0),
     bleed_mm:    float = Form(3.0),
     min_dpi:     int   = Form(300),
+    max_tac:     int   = Form(250),
     gen_report:  bool  = Form(True),
 ):
     """直接執行，適合 < 20MB、單頁稿件"""
@@ -92,7 +93,7 @@ async def run_preflight_sync(
             tmp.write(await file.read())
             tmp_path = tmp.name
 
-        checker = PreflightChecker(tmp_path, w, h, bleed_mm, min_dpi)
+        checker = PreflightChecker(tmp_path, w, h, bleed_mm, min_dpi, max_tac=max_tac)
         report  = checker.run_all()
     finally:
         if tmp_path and os.path.exists(tmp_path):
@@ -103,7 +104,7 @@ async def run_preflight_sync(
         report_id   = uuid.uuid4().hex[:12]
         report_path = REPORTS_DIR / f"preflight_{report_id}.pdf"
         generate_pdf_report(report, str(report_path),
-                            spec_name=spec_name, bleed_mm=bleed_mm, min_dpi=min_dpi)
+                            spec_name=spec_name, bleed_mm=bleed_mm, min_dpi=min_dpi, max_tac=max_tac)
         report_url = f"/reports/{report_id}"
 
     return _serialize(report, file.filename, spec_name, report_url, report_id)
@@ -118,6 +119,7 @@ async def run_preflight_async(
     spec_height: float = Form(0),
     bleed_mm:    float = Form(3.0),
     min_dpi:     int   = Form(300),
+    max_tac:     int   = Form(250),
     gen_report:  bool  = Form(True),
 ):
     """
@@ -128,14 +130,12 @@ async def run_preflight_async(
     if not file.filename.lower().endswith(SUPPORTED_EXTENSIONS):
         raise HTTPException(400, "只接受 PDF（.pdf）或 Adobe Illustrator（.ai）檔案")
 
-    # 儲存上傳檔案（任務完成後 worker 自動刪除）
     job_id    = uuid.uuid4().hex[:16]
     suffix    = Path(file.filename).suffix.lower()
     save_path = UPLOAD_DIR / f"{job_id}{suffix}"
     with open(save_path, "wb") as f:
         f.write(await file.read())
 
-    # 送入 Celery 佇列
     task = run_preflight_task.apply_async(
         kwargs={
             "job_id":      job_id,
@@ -146,6 +146,7 @@ async def run_preflight_async(
             "spec_height": spec_height,
             "bleed_mm":    bleed_mm,
             "min_dpi":     min_dpi,
+            "max_tac":     max_tac,
             "gen_report":  gen_report,
         },
         task_id=job_id,
