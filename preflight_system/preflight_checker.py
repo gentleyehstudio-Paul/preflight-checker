@@ -121,6 +121,7 @@ class PreflightChecker:
         bleed_mm:       float = 3.0,
         min_dpi:        int   = 300,
         tolerance_mm:   float = 0.5,
+        max_tac:        int   = 250,   # 總墨量上限（%）
     ):
         self.path          = Path(pdf_path)
         self.spec_w        = spec_width_mm
@@ -128,6 +129,7 @@ class PreflightChecker:
         self.bleed_mm      = bleed_mm
         self.min_dpi       = min_dpi
         self.tol           = tolerance_mm
+        self.max_tac       = max_tac
 
         ext = self.path.suffix.lower()
         self.is_ai_file        = (ext == ".ai")
@@ -335,24 +337,28 @@ class PreflightChecker:
     # ─────────────────────────────────────────
 
     def check_bleed(self) -> CheckResult:
+        """
+        出血檢查邏輯：
+        以「視覺判斷」為核心 ——
+        只要 MediaBox（整個畫布）比規格成品尺寸大出足夠的出血量，就判定通過。
+        不依賴 TrimBox/BleedBox 的差值計算（這兩個欄位在 AI 存檔時常常缺失或不準確）。
+
+        優先順序：
+          1. 有 BleedBox → 用 BleedBox vs TrimBox（最精確）
+          2. 有 TrimBox  → 用 TrimBox vs 規格，再跟 MediaBox 取較大值
+          3. 其他        → 直接用 MediaBox vs 規格（視覺邏輯）
+        """
         result = CheckResult(module="出血設定檢查", status=Status.PASS)
-        page = self.doc[0]
+        page   = self.doc[0]
+        media  = page.mediabox
+        trim   = page.trimbox
 
-        media = page.mediabox   # 最外框
-        trim  = page.trimbox    # 裁切線（成品）
+        required    = self.bleed_mm
+        spec_w_pt   = self.spec_w * self.PT_PER_MM
+        spec_h_pt   = self.spec_h * self.PT_PER_MM
 
-        # ── 判斷 TrimBox 是否有效設定 ──────────────────────
-        # PyMuPDF 當 TrimBox 未設定時會回傳與 MediaBox 相同的值
-        trimbox_is_set = (
-            abs(trim.x0 - media.x0) > 0.5 or
-            abs(trim.y0 - media.y0) > 0.5 or
-            abs(trim.x1 - media.x1) > 0.5 or
-            abs(trim.y1 - media.y1) > 0.5
-        )
-
+        # ── 嘗試讀取 BleedBox ──────────────────────────────
         bleed_box = None
-
-        # ── 嘗試讀取 BleedBox ───────────────────────────────
         try:
             xref = page.xref
             if xref > 0:
@@ -365,67 +371,72 @@ class PreflightChecker:
         except Exception:
             pass
 
-        # ── 計算四邊出血值 ──────────────────────────────────
-        if bleed_box is not None:
-            # 情境 A：有 BleedBox → 最精確，直接算 BleedBox 和 TrimBox 的差值
-            bleed_left   = self._pt_to_mm(trim.x0 - bleed_box.x0)
-            bleed_right  = self._pt_to_mm(bleed_box.x1 - trim.x1)
-            bleed_top    = self._pt_to_mm(bleed_box.y1 - trim.y1)
-            bleed_bottom = self._pt_to_mm(trim.y0 - bleed_box.y0)
-            result.add("BleedBox", "已設定", Status.PASS)
+        # ── 判斷 TrimBox 是否有意義（與 MediaBox 不同才算有效）
+        trimbox_is_set = (
+            abs(trim.x0 - media.x0) > 0.5 or
+            abs(trim.y0 - media.y0) > 0.5 or
+            abs(trim.x1 - media.x1) > 0.5 or
+            abs(trim.y1 - media.y1) > 0.5
+        )
+
+        # ── 核心計算：MediaBox 比規格尺寸大多少 ────────────
+        # 自動判斷直式/橫式：選誤差較小的方向
+        diff_normal  = abs(media.width  - spec_w_pt) + abs(media.height - spec_h_pt)
+        diff_rotated = abs(media.width  - spec_h_pt) + abs(media.height - spec_w_pt)
+
+        if diff_rotated < diff_normal:
+            base_w, base_h = spec_h_pt, spec_w_pt   # 橫式
+        else:
+            base_w, base_h = spec_w_pt, spec_h_pt   # 直式
+
+        # MediaBox 超出成品規格的量（均分四邊）
+        media_bleed_w = max(0.0, media.width  - base_w) / 2
+        media_bleed_h = max(0.0, media.height - base_h) / 2
+
+        # ── 選擇最終出血值：以最可靠的來源為準 ────────────
+        if bleed_box is not None and trimbox_is_set:
+            # 情境 A：BleedBox + TrimBox 都有 → 最精確
+            bl = self._pt_to_mm(trim.x0 - bleed_box.x0)
+            br = self._pt_to_mm(bleed_box.x1 - trim.x1)
+            bt = self._pt_to_mm(bleed_box.y1 - trim.y1)
+            bb = self._pt_to_mm(trim.y0 - bleed_box.y0)
+            result.add("出血來源", "BleedBox（最精確）", Status.PASS)
 
         elif trimbox_is_set:
-            # 情境 B：有 TrimBox（與 MediaBox 不同）→ 用 MediaBox 和 TrimBox 差值估算
-            bleed_left   = self._pt_to_mm(trim.x0 - media.x0)
-            bleed_right  = self._pt_to_mm(media.x1 - trim.x1)
-            bleed_top    = self._pt_to_mm(media.y1 - trim.y1)
-            bleed_bottom = self._pt_to_mm(trim.y0 - media.y0)
-            result.add("BleedBox", "未設定（以 MediaBox/TrimBox 差值推算）", Status.PASS,
-                       "建議存檔時設定 BleedBox，部分 RIP 系統需要此欄位")
+            # 情境 B：只有 TrimBox
+            # TrimBox 差值與 MediaBox 視覺值取較大者，避免 TrimBox 異常導致誤判
+            bl_trim = self._pt_to_mm(trim.x0 - media.x0)
+            br_trim = self._pt_to_mm(media.x1 - trim.x1)
+            bt_trim = self._pt_to_mm(media.y1 - trim.y1)
+            bb_trim = self._pt_to_mm(trim.y0 - media.y0)
+            mv      = self._pt_to_mm(min(media_bleed_w, media_bleed_h))
+            bl = max(bl_trim, 0.0, mv)
+            br = max(br_trim, 0.0, mv)
+            bt = max(bt_trim, 0.0, mv)
+            bb = max(bb_trim, 0.0, mv)
+            result.add("出血來源", "TrimBox + MediaBox 視覺值（取較大）", Status.PASS)
 
         else:
-            # 情境 C：TrimBox 未設定（AI 檔常見）
-            # MediaBox 本身即為含出血的畫布，以規格成品尺寸計算多出的出血量
-            spec_w_pt = self.spec_w * self.PT_PER_MM
-            spec_h_pt = self.spec_h * self.PT_PER_MM
-            media_w_pt = media.width
-            media_h_pt = media.height
-
-            # 自動判斷直式或橫式：選差值較小（更接近規格）的方向
-            diff_normal  = abs(media_w_pt - spec_w_pt) + abs(media_h_pt - spec_h_pt)
-            diff_rotated = abs(media_w_pt - spec_h_pt) + abs(media_h_pt - spec_w_pt)
-
-            if diff_rotated < diff_normal:
-                # 橫式：用旋轉後的規格計算
-                extra_w = max(0.0, media_w_pt - spec_h_pt) / 2
-                extra_h = max(0.0, media_h_pt - spec_w_pt) / 2
-            else:
-                # 直式（預設）
-                extra_w = max(0.0, media_w_pt - spec_w_pt) / 2
-                extra_h = max(0.0, media_h_pt - spec_h_pt) / 2
-
-            bleed_left = bleed_right = self._pt_to_mm(extra_w)
-            bleed_top  = bleed_bottom = self._pt_to_mm(extra_h)
-
-            result.add("BleedBox", "未設定", Status.PASS,
-                       "建議存檔時設定 BleedBox，部分 RIP 系統需要此欄位")
-            result.add("TrimBox",  "未設定（以成品規格反推出血量）", Status.PASS,
-                       f"系統以規格尺寸 {self.spec_w}×{self.spec_h} mm 計算 MediaBox 多出的出血量")
+            # 情境 C：沒有 TrimBox / BleedBox → 純視覺邏輯
+            bl = br = self._pt_to_mm(media_bleed_w)
+            bt = bb = self._pt_to_mm(media_bleed_h)
+            result.add("出血來源", "MediaBox 視覺推算", Status.PASS,
+                       f"畫布寬 {self._pt_to_mm(media.width):.1f}mm，"
+                       f"規格 {self.spec_w}mm，"
+                       f"推算各邊出血 {self._pt_to_mm(media_bleed_w):.1f}mm")
 
         # ── 四邊判定 ────────────────────────────────────────
-        required = self.bleed_mm
-        for direction, val in [("上", bleed_top), ("下", bleed_bottom),
-                                ("左", bleed_left), ("右", bleed_right)]:
-            val = max(0.0, val)   # 負值視為 0（TrimBox 異常時保護）
+        for direction, val in [("上", bt), ("下", bb), ("左", bl), ("右", br)]:
+            val = max(0.0, val)
             if required == 0:
-                result.add(f"出血值（{direction}）", f"{val} mm", Status.PASS)
+                result.add(f"出血值（{direction}）", f"{val:.1f} mm", Status.PASS)
             elif val >= required:
-                result.add(f"出血值（{direction}）", f"{val} mm", Status.PASS)
+                result.add(f"出血值（{direction}）", f"{val:.1f} mm", Status.PASS)
             elif val >= required * 0.7:
-                result.add(f"出血值（{direction}）", f"{val} mm（略不足，需 {required} mm）",
+                result.add(f"出血值（{direction}）", f"{val:.1f} mm（略不足，需 {required} mm）",
                            Status.WARNING, "可能影響裁切安全距離")
             else:
-                result.add(f"出血值（{direction}）", f"{val} mm（不足，需 {required} mm）",
+                result.add(f"出血值（{direction}）", f"{val:.1f} mm（不足，需 {required} mm）",
                            Status.FAIL, "出血不足，印刷裁切後可能出現白邊")
 
         return result
@@ -436,40 +447,62 @@ class PreflightChecker:
 
     def check_size(self) -> CheckResult:
         result = CheckResult(module="成品尺寸檢查", status=Status.PASS)
-        page = self.doc[0]
-        trim = page.trimbox
+        page   = self.doc[0]
+        media  = page.mediabox
+        trim   = page.trimbox
 
-        actual_w = self._pt_to_mm(trim.width)
-        actual_h = self._pt_to_mm(trim.height)
+        trimbox_is_set = (
+            abs(trim.x0 - media.x0) > 0.5 or abs(trim.y0 - media.y0) > 0.5 or
+            abs(trim.x1 - media.x1) > 0.5 or abs(trim.y1 - media.y1) > 0.5
+        )
 
-        # 方向判斷（自動比對橫/直式）
+        # 尺寸比對來源：有 TrimBox 用 TrimBox，否則用 MediaBox 扣掉出血後的淨尺寸
+        if trimbox_is_set:
+            actual_w = self._pt_to_mm(trim.width)
+            actual_h = self._pt_to_mm(trim.height)
+            size_src = "TrimBox"
+        else:
+            # TrimBox 未設定時：從 MediaBox 扣掉出血量推算成品尺寸
+            # （出血量以規格反推，與 check_bleed 視覺邏輯一致）
+            spec_w_pt = self.spec_w * self.PT_PER_MM
+            spec_h_pt = self.spec_h * self.PT_PER_MM
+            diff_n = abs(media.width - spec_w_pt) + abs(media.height - spec_h_pt)
+            diff_r = abs(media.width - spec_h_pt) + abs(media.height - spec_w_pt)
+            if diff_r < diff_n:
+                bw = max(0.0, media.width  - spec_h_pt) / 2
+                bh = max(0.0, media.height - spec_w_pt) / 2
+            else:
+                bw = max(0.0, media.width  - spec_w_pt) / 2
+                bh = max(0.0, media.height - spec_h_pt) / 2
+            actual_w = self._pt_to_mm(media.width  - 2 * bw)
+            actual_h = self._pt_to_mm(media.height - 2 * bh)
+            size_src = "MediaBox（已扣除出血）"
+
+        # 方向判斷（直式 / 橫式）
         spec_w, spec_h = self.spec_w, self.spec_h
-        if (self._close(actual_w, spec_w) and self._close(actual_h, spec_h)):
-            orientation = "直式"
-            match = True
-        elif (self._close(actual_w, spec_h) and self._close(actual_h, spec_w)):
-            orientation = "橫式"
-            match = True
-            spec_w, spec_h = self.spec_h, self.spec_w   # 調整比對方向
+        if self._close(actual_w, spec_w) and self._close(actual_h, spec_h):
+            orientation, match = "直式", True
+        elif self._close(actual_w, spec_h) and self._close(actual_h, spec_w):
+            orientation, match = "橫式", True
+            spec_w, spec_h = self.spec_h, self.spec_w
         else:
             orientation = "直式" if actual_h >= actual_w else "橫式"
             match = False
 
-        result.add("TrimBox", "已設定" if trim != page.mediabox else "未設定（使用 MediaBox）",
-                   Status.PASS if trim != page.mediabox else Status.WARNING)
+        result.add("尺寸來源", size_src, Status.PASS)
         result.add("頁面方向", orientation, Status.PASS)
-        result.add("實際尺寸", f"{actual_w} × {actual_h} mm", Status.PASS if match else Status.FAIL)
+        result.add("實際成品尺寸", f"{actual_w:.1f} × {actual_h:.1f} mm",
+                   Status.PASS if match else Status.FAIL)
         result.add("規格要求", f"{self.spec_w} × {self.spec_h} mm",
                    Status.PASS if match else Status.FAIL,
                    "" if match else "尺寸與訂單不符，請確認後重新供稿")
 
         page_count = len(self.doc)
         if self.is_ai_file:
-            if page_count > 1:
-                result.add("工作區域數量", f"{page_count} 個", Status.PASS,
-                           "AI 檔案含多個工作區域（Artboard），系統以第一個工作區域進行尺寸與出血比對，其餘工作區域請分別輸出檢查")
-            else:
-                result.add("工作區域數量", f"{page_count} 個", Status.PASS)
+            label = "工作區域數量"
+            note  = ("AI 檔案含多個工作區域，系統以第一個比對，其餘請分別輸出"
+                     if page_count > 1 else "")
+            result.add(label, f"{page_count} 個", Status.PASS, note)
         else:
             result.add("總頁數", f"{page_count} 頁", Status.PASS)
 
@@ -601,6 +634,91 @@ class PreflightChecker:
         return result
 
     # ─────────────────────────────────────────
+    # 6. 總墨量（TAC）背印檢查
+    # ─────────────────────────────────────────
+
+    def check_tac(self) -> CheckResult:
+        """
+        Total Area Coverage (TAC) 檢查。
+        掃描 content stream 中的 CMYK 填色指令（k/K），
+        計算 C+M+Y+K 總和，超過上限即警告或退稿。
+
+        背印（Back Trap）原因：
+            墨量過高 → 油墨未乾透 → 印到背面（背印）
+        建議上限：250%（本系統預設）
+        絕對上限：300%（業界標準，超過必退稿）
+        """
+        result = CheckResult(module="總墨量（TAC）背印檢查", status=Status.PASS)
+
+        warn_limit = self.max_tac       # 警告線（預設 250%）
+        fail_limit = max(300, self.max_tac + 50)  # 退稿線（不低於 300%）
+
+        max_found   = 0.0       # 全文件最高 TAC
+        over_warn   = []        # [(page, tac)] 超過警告線
+        over_fail   = []        # [(page, tac)] 超過退稿線
+        samples     = []        # 超標色值樣本
+
+        for page_num in range(len(self.doc)):
+            page = self.doc[page_num]
+            try:
+                content = page.read_contents().decode("latin-1", errors="replace")
+            except Exception:
+                continue
+
+            # k = CMYK 填色；K = CMYK 描邊
+            # 格式：c m y k  k（或 K）
+            cmyk_ops = re.findall(
+                r'([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+[kK]\b',
+                content
+            )
+
+            for c, m, y, k in cmyk_ops:
+                tac = round((float(c) + float(m) + float(y) + float(k)) * 100, 1)
+                if tac > max_found:
+                    max_found = tac
+                if tac > fail_limit:
+                    over_fail.append((page_num + 1, tac))
+                    if len(samples) < 3:
+                        samples.append(f"P{page_num+1}:C{int(float(c)*100)}M{int(float(m)*100)}"
+                                       f"Y{int(float(y)*100)}K{int(float(k)*100)}={tac:.0f}%")
+                elif tac > warn_limit:
+                    over_warn.append((page_num + 1, tac))
+                    if len(samples) < 3:
+                        samples.append(f"P{page_num+1}:C{int(float(c)*100)}M{int(float(m)*100)}"
+                                       f"Y{int(float(y)*100)}K{int(float(k)*100)}={tac:.0f}%")
+
+        # ── 輸出 ──────────────────────────────────────────────
+        result.add("TAC 上限設定", f"{warn_limit}%", Status.PASS)
+        result.add("最高 TAC", f"{max_found:.0f}%",
+                   Status.PASS    if max_found <= warn_limit  else
+                   Status.WARNING if max_found <= fail_limit  else
+                   Status.FAIL)
+
+        if not over_fail and not over_warn:
+            result.add("超標物件", "0 個", Status.PASS,
+                       "所有向量色彩均在墨量上限內")
+        elif over_fail:
+            pages = sorted(set(p for p, _ in over_fail))
+            result.add(f"超過退稿線（{fail_limit}%）", f"{len(over_fail)} 個（頁面：{pages}）",
+                       Status.FAIL,
+                       f"範例：{'、'.join(samples[:2])}　|　背印風險極高，必須降低墨量")
+            if over_warn:
+                wpages = sorted(set(p for p, _ in over_warn))
+                result.add(f"超過警告線（{warn_limit}%）", f"{len(over_warn)} 個（頁面：{wpages}）",
+                           Status.WARNING, "建議調整")
+        else:
+            pages = sorted(set(p for p, _ in over_warn))
+            result.add(f"超過警告線（{warn_limit}%）", f"{len(over_warn)} 個（頁面：{pages}）",
+                       Status.WARNING,
+                       f"範例：{'、'.join(samples[:2])}　|　建議降低墨量以避免背印")
+            result.add(f"超過退稿線（{fail_limit}%）", "0 個", Status.PASS)
+
+        if max_found == 0:
+            result.add("備註", "未偵測到 CMYK 向量指令（可能為純 RGB 或純文字）", Status.PASS)
+
+        return result
+
+    # ─────────────────────────────────────────
     # 執行全部檢查
     # ─────────────────────────────────────────
 
@@ -622,6 +740,7 @@ class PreflightChecker:
             self.check_bleed,
             self.check_size,
             self.check_resolution,
+            self.check_tac,
         ]
         for fn in checks:
             try:
