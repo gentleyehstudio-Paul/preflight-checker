@@ -346,10 +346,11 @@ class PreflightChecker:
             不依賴 BleedBox / TrimBox 設定。
         第二層 視覺模擬（Visual Inspection）：
             將畫布往外擴張後以 300 dpi 光柵化，以像素檢查裁切線外是否有實際墨色，
-            可還原「畫板等於成品尺寸、超出畫板的圖在輸出時被裁切」的情況，
-            模擬人眼把畫板拉開後看到的出血覆蓋。
+            可還原「畫板等於成品尺寸、超出畫板的圖在輸出時被裁切」的情況。
 
         最終以兩層中「較大」的出血覆蓋為準（任一層達標即視為有出血）。
+        另外獨立標示「文件是否內嵌出血框（BleedBox）」——
+        即使肉眼合格，但發稿人未設出血框時，仍以「注意」狀態提示印刷廠。
         """
         result   = CheckResult(module="出血設定檢查", status=Status.PASS)
         page     = self.doc[0]
@@ -377,6 +378,20 @@ class PreflightChecker:
             trim_rect = fitz.Rect(cx - sw / 2, cy - sh / 2, cx + sw / 2, cy + sh / 2)
             src = "成品尺寸置中推算"
         result.add("裁切線來源", src, Status.PASS)
+
+        # ── 文件是否內嵌出血框（BleedBox 大於成品框）──────────
+        try:
+            bbox_b = page.bleedbox
+            has_bleed_setting = (
+                bbox_b.x0 < trim_rect.x0 - 0.5 or bbox_b.y0 < trim_rect.y0 - 0.5 or
+                bbox_b.x1 > trim_rect.x1 + 0.5 or bbox_b.y1 > trim_rect.y1 + 0.5
+            )
+        except Exception:
+            has_bleed_setting = False
+        result.add("文件出血框（BleedBox）",
+                   "已設定" if has_bleed_setting else "未設定",
+                   Status.PASS if has_bleed_setting else Status.WARNING,
+                   "" if has_bleed_setting else "發稿人未在軟體開啟出血框設定")
 
         # ── 兩層內容範圍 ────────────────────────────────────
         expand = max(required, 3.0) + 5.0   # 視覺層往外掃描帶（mm）
@@ -406,12 +421,16 @@ class PreflightChecker:
                 else:                   vals.append(cb.x1 - trim_rect.x1)
             return max(vals) if vals else 0.0
 
+        all_ok = True
         for direction in ("上", "下", "左", "右"):
             val   = self._pt_to_mm(_side_pt(direction))
             shown = max(0.0, val)
+            ok    = (required == 0) or (val >= required - TOL_MM)
+            if not ok:
+                all_ok = False
             if required == 0:
                 result.add(f"出血量（{direction}）", f"{shown:.1f} mm", Status.PASS)
-            elif val >= required - TOL_MM:
+            elif ok:
                 result.add(f"出血量（{direction}）", f"{shown:.1f} mm",
                            Status.PASS, "內容已延伸超出裁切線達要求出血")
             elif val >= required * 0.7:
@@ -422,6 +441,14 @@ class PreflightChecker:
                 result.add(f"出血量（{direction}）",
                            f"{shown:.1f} mm（不足，需 {required} mm）",
                            Status.FAIL, "裁切線外未偵測到足夠內容，裁切後極可能露白邊")
+
+        # ── 綜合判定（建議4：獨立提示狀態）──────────────────
+        if all_ok and not has_bleed_setting:
+            result.add("綜合判定", "視覺出血合格（檔案未內嵌出血設定）", Status.WARNING,
+                       "內容已超出裁切線達要求，可直接拼版印刷；惟發稿人未開啟軟體出血框，"
+                       "建議提醒對方補設，以利後續流程與存檔規範。")
+        elif all_ok and has_bleed_setting:
+            result.add("綜合判定", "出血合格（已內嵌出血框）", Status.PASS)
 
         return result
 
